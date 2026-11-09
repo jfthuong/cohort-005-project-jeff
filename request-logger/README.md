@@ -85,6 +85,33 @@ On Windows, run that in PowerShell (not Command Prompt) as:
 $env:PORT = 9000; npm run request-logger
 ```
 
+### Corporate certificates and TLS errors
+
+If Copilot reports `502 "request-logger upstream error: unable to get local
+issuer certificate"`, the logger's HTTPS connection failed certificate
+verification. This can also prevent the model catalog, connectors, and built-in
+GitHub MCP server from loading.
+
+Both `npm run request-logger` and `npm run copilot-logger` add the operating
+system's trusted CA certificates to Node's default trust store on Node.js 22.15+
+(or 23.10+). This supports corporate TLS inspection when your organization's
+CA is already trusted by Windows. Bundled roots and `NODE_EXTRA_CA_CERTS` are
+preserved, and certificate and hostname verification remain enabled.
+
+Restart the logger after updating it or changing trusted certificates. If the
+organization's CA is not in the OS trust store, obtain its PEM CA bundle from
+your IT team and set this in the terminal **before starting the logger**:
+
+```powershell
+$env:NODE_EXTRA_CA_CERTS = 'C:\certificates\corporate-ca-bundle.pem'
+npm run request-logger
+```
+
+For the Copilot-only logger, use `npm run copilot-logger` instead. Older Node
+versions print a warning and retain Node's default trust behavior; upgrade Node
+or use the PEM bundle above. Do not use `NODE_TLS_REJECT_UNAUTHORIZED=0` or
+disable certificate verification to work around this error.
+
 A remembered answer is kept in `request-logger/.agent-choice.json`, which is
 gitignored. It holds your choice only. The host, the renderer and the command are
 worked out again on every start, so an update to this tool reaches you without

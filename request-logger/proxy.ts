@@ -32,6 +32,7 @@ import {
   type ResolvedTarget,
 } from "./agents";
 import { askChoice, clearChoice, loadChoice, saveChoice } from "./config";
+import { createUpstreamAgent } from "./tls";
 
 /**
  * A resolved target the proxy can actually route to and render: a catalogue
@@ -135,7 +136,8 @@ function forwardHeaders(
 function handle(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  target: ProxyTarget
+  target: ProxyTarget,
+  upstreamAgent: https.Agent
 ): void {
   const reqPath = req.url ?? "/";
   // The path actually sent upstream: the agent's own request path, prefixed
@@ -190,7 +192,10 @@ function handle(
       },
     };
     const upstreamReq = useHttps
-      ? https.request(requestOptions, onUpstreamResponse)
+      ? https.request(
+          { ...requestOptions, agent: upstreamAgent },
+          onUpstreamResponse
+        )
       : http.request(requestOptions, onUpstreamResponse);
 
     upstreamReq.on("error", (err) => {
@@ -543,7 +548,10 @@ async function main(): Promise<void> {
   }
 
   const target = resolution;
-  const server = http.createServer((req, res) => handle(req, res, target));
+  const upstreamAgent = createUpstreamAgent();
+  const server = http.createServer((req, res) =>
+    handle(req, res, target, upstreamAgent)
+  );
   server.on("upgrade", rejectUpgrade);
   server.listen(PORT, () => {
     printBanner(target);
