@@ -5,6 +5,7 @@ import { DevUI } from "~/components/dev-ui";
 import { Toaster } from "sonner";
 import { getCurrentUserId, getDevCountry } from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
+import { isFailingNextPayout } from "~/lib/payment-system.server";
 import { eq, and, or, sql, desc } from "drizzle-orm";
 import { db } from "~/db";
 import {
@@ -212,6 +213,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     devCountry,
     countryTierInfo,
     countries: COUNTRIES,
+    failNextPayout: isFailingNextPayout(),
     isTeamAdmin: currentUserId ? isTeamAdmin(currentUserId) : false,
   };
 }
@@ -224,6 +226,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     devCountry,
     countryTierInfo,
     countries,
+    failNextPayout,
     isTeamAdmin: userIsTeamAdmin,
   } = loaderData;
 
@@ -243,6 +246,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
         devCountry={devCountry}
         countryTierInfo={countryTierInfo}
         countries={countries}
+        failNextPayout={failNextPayout}
       />
       <Toaster position="bottom-right" richColors closeButton />
     </div>
