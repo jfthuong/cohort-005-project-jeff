@@ -9,6 +9,7 @@ import { CourseImage } from "~/components/course-image";
 import { DevUI } from "~/components/dev-ui";
 import { getCurrentUserId, getDevCountry } from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
+import { isFailingNextPayout } from "~/lib/payment-system.server";
 import { eq, like, and, or, sql } from "drizzle-orm";
 import { db } from "~/db";
 import { courses, categories, users, modules, lessons } from "~/db/schema";
@@ -135,11 +136,12 @@ export async function loader({ request }: Route.LoaderArgs) {
     devCountry,
     countryTierInfo,
     countries: COUNTRIES,
+    failNextPayout: isFailingNextPayout(),
   };
 }
 
 export default function Home({ loaderData }: Route.ComponentProps) {
-  const { featuredCourses, totalCourses, totalCategories, users, currentUser, devCountry, countryTierInfo, countries } = loaderData;
+  const { featuredCourses, totalCourses, totalCategories, users, currentUser, devCountry, countryTierInfo, countries, failNextPayout } = loaderData;
   const [isDark, setIsDark] = useState(false);
 
   useEffect(() => {
@@ -307,6 +309,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
         devCountry={devCountry}
         countryTierInfo={countryTierInfo}
         countries={countries}
+        failNextPayout={failNextPayout}
       />
     </div>
   );

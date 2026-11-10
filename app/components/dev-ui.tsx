@@ -3,7 +3,7 @@ import { Form, useLocation } from "react-router";
 import { Button } from "~/components/ui/button";
 import { cn } from "~/lib/utils";
 import type { UserRole } from "~/db/schema";
-import { ChevronDown, ChevronUp, Globe } from "lucide-react";
+import { ChevronDown, ChevronUp, CreditCard, Globe } from "lucide-react";
 
 interface DevUser {
   id: number;
@@ -17,6 +17,7 @@ interface DevUIProps {
   devCountry: string | null;
   countryTierInfo: { tier: number; discount: number; label: string };
   countries: { code: string; name: string }[];
+  failNextPayout: boolean;
 }
 
 const roleBadgeColors: Record<string, string> = {
@@ -40,7 +41,7 @@ function RoleBadge({ role }: { role: string }) {
   );
 }
 
-export function DevUI({ users, currentUser, devCountry, countryTierInfo, countries }: DevUIProps) {
+export function DevUI({ users, currentUser, devCountry, countryTierInfo, countries, failNextPayout }: DevUIProps) {
   const [minimized, setMinimized] = useState(false);
   const [open, setOpen] = useState(false);
   const location = useLocation();
@@ -165,6 +166,29 @@ export function DevUI({ users, currentUser, devCountry, countryTierInfo, countri
               )}
             </div>
           )}
+        </div>
+
+        {/* Payment System */}
+        <div className="mt-3 border-t border-dashed pt-3">
+          <div className="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+            <CreditCard className="size-3" />
+            Payment System
+          </div>
+          <Form
+            method="post"
+            action={`/api/set-fail-next-payout?redirectTo=${encodeURIComponent(location.pathname + location.search)}`}
+          >
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                name="fail"
+                defaultChecked={failNextPayout}
+                key={String(failNextPayout)}
+                onChange={(e) => e.target.form?.requestSubmit()}
+              />
+              Fail next payout
+            </label>
+          </Form>
         </div>
       </div>
     </div>
