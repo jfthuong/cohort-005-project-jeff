@@ -1,9 +1,11 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   courses,
+  enrollments,
   lessons,
   modules,
+  PayoutAttemptResult,
   payoutAttempts,
   purchases,
   refundRequests,
@@ -13,7 +15,11 @@ import {
   users,
   videoWatchEvents,
 } from "~/db/schema";
-import { getPaymentSystem } from "~/lib/payment-system.server";
+import {
+  getPaymentSystem,
+  type PaymentSystem,
+  type PayoutResult,
+} from "~/lib/payment-system.server";
 import { formatPrice } from "~/lib/utils";
 
 export type Decision = "approve" | "decline";
@@ -64,7 +70,130 @@ export function getWatchedSeconds(userId: number, courseId: number): number {
  */
 export function sendRefund(refund: { id: number; amount: number }) {
   db.insert(payoutAttempts).values({ refundId: refund.id }).run();
-  getPaymentSystem().sendPayout({ refundId: refund.id, amount: refund.amount });
+  paymentSystem().sendPayout({ refundId: refund.id, amount: refund.amount });
+}
+
+const systemsReportingToUs = new WeakSet<PaymentSystem>();
+
+// onResult replaces any earlier callback, so register on whichever Payment
+// System is current (tests and the dev server can swap it) before sending.
+function paymentSystem() {
+  const system = getPaymentSystem();
+  if (!systemsReportingToUs.has(system)) {
+    system.onResult(handlePayoutResult);
+    systemsReportingToUs.add(system);
+  }
+  return system;
+}
+
+function handlePayoutResult(result: PayoutResult) {
+  try {
+    settleRefund(result);
+  } catch (error) {
+    console.error(`[payments] could not settle refund ${result.refundId}`, error);
+  }
+}
+
+/**
+ * Records what the Payment System reported for a Refund's latest unsettled
+ * Payout Attempt. A result for an attempt that is already settled is ignored.
+ */
+function settleRefund(result: PayoutResult) {
+  const sent = result.status === "sent";
+
+  const settled = db.transaction((tx) => {
+    const attempt = tx
+      .select({ id: payoutAttempts.id })
+      .from(payoutAttempts)
+      .where(
+        and(
+          eq(payoutAttempts.refundId, result.refundId),
+          isNull(payoutAttempts.settledAt)
+        )
+      )
+      .orderBy(desc(payoutAttempts.id))
+      .get();
+    if (!attempt) return null;
+
+    tx.update(payoutAttempts)
+      .set({
+        settledAt: new Date().toISOString(),
+        result: sent ? PayoutAttemptResult.Sent : PayoutAttemptResult.Failed,
+        failureReason: sent ? null : result.reason,
+      })
+      .where(eq(payoutAttempts.id, attempt.id))
+      .run();
+
+    tx.update(refunds)
+      .set({ status: sent ? RefundStatus.Issued : RefundStatus.Failed })
+      .where(eq(refunds.id, result.refundId))
+      .run();
+
+    const refund = tx
+      .select({
+        amount: refunds.amount,
+        learnerId: users.id,
+        learnerName: users.name,
+        learnerEmail: users.email,
+        courseId: courses.id,
+        courseTitle: courses.title,
+      })
+      .from(refunds)
+      .innerJoin(refundRequests, eq(refunds.refundRequestId, refundRequests.id))
+      .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
+      .innerJoin(users, eq(purchases.userId, users.id))
+      .innerJoin(courses, eq(purchases.courseId, courses.id))
+      .where(eq(refunds.id, result.refundId))
+      .get()!;
+
+    // The learner loses access to the course only once the money has gone.
+    if (sent) {
+      tx.delete(enrollments)
+        .where(
+          and(
+            eq(enrollments.userId, refund.learnerId),
+            eq(enrollments.courseId, refund.courseId)
+          )
+        )
+        .run();
+    }
+
+    return refund;
+  });
+
+  if (!settled) return;
+
+  const email = buildPayoutEmail({
+    ...settled,
+    failureReason: result.status === "failed" ? result.reason : null,
+  });
+  console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);
+}
+
+/**
+ * An Admin hands a Failed Refund to the Payment System again as a new Payout
+ * Attempt. Only a Failed Refund can be retried.
+ */
+export function retryRefund(refundId: number) {
+  const refund = db
+    .update(refunds)
+    .set({ status: RefundStatus.Pending })
+    .where(and(eq(refunds.id, refundId), eq(refunds.status, RefundStatus.Failed)))
+    .returning()
+    .get();
+
+  if (!refund) {
+    const exists = db
+      .select({ id: refunds.id })
+      .from(refunds)
+      .where(eq(refunds.id, refundId))
+      .get();
+    throw exists
+      ? new DecisionError("Only a Failed Refund can be retried.", 409)
+      : new DecisionError("Refund not found.", 404);
+  }
+
+  sendRefund(refund);
 }
 
 function getRefundRequestForDecision(refundRequestId: number) {
@@ -193,6 +322,41 @@ function buildDecisionEmail(input: {
     subject: input.approved
       ? `Refund request approved — ${input.courseTitle}`
       : `Refund request declined — ${input.courseTitle}`,
+    body: [...body, "", "— The Cadence team"].join("\n"),
+  };
+}
+
+/**
+ * The email telling the learner what the Payment System reported for their
+ * Refund. Like the Decision email, it goes to the server log.
+ */
+function buildPayoutEmail(input: {
+  learnerName: string;
+  learnerEmail: string;
+  courseTitle: string;
+  amount: number;
+  failureReason: string | null;
+}) {
+  const sent = input.failureReason === null;
+  const body = sent
+    ? [
+        `Hi ${input.learnerName},`,
+        "",
+        `Your refund of ${formatPrice(input.amount)} for "${input.courseTitle}" has been sent.`,
+        "Your access to the course has now ended.",
+      ]
+    : [
+        `Hi ${input.learnerName},`,
+        "",
+        `We couldn't send your refund of ${formatPrice(input.amount)} for "${input.courseTitle}".`,
+        "Our team is on it and will try again. You keep access to the course in the meantime.",
+      ];
+
+  return {
+    to: input.learnerEmail,
+    subject: sent
+      ? `Refund sent — ${input.courseTitle}`
+      : `Refund failed — ${input.courseTitle}`,
     body: [...body, "", "— The Cadence team"].join("\n"),
   };
 }

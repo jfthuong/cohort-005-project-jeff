@@ -2,8 +2,14 @@ import { useEffect, useState } from "react";
 import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
 import { toast } from "sonner";
 import { z } from "zod";
-import { asc, eq, sql } from "drizzle-orm";
-import { AlertTriangle, Clock, Receipt } from "lucide-react";
+import { asc, eq, inArray, sql } from "drizzle-orm";
+import {
+  AlertTriangle,
+  Clock,
+  Receipt,
+  RotateCcw,
+  XCircle,
+} from "lucide-react";
 import type { Route } from "./+types/admin.refunds";
 import { db } from "~/db";
 import {
@@ -23,6 +29,7 @@ import {
   DecisionError,
   decideRefundRequest,
   getWatchedSeconds,
+  retryRefund,
 } from "~/lib/refunds.server";
 import { daysSince, formatPrice, formatRelativeTime } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
@@ -31,6 +38,10 @@ import { Label } from "~/components/ui/label";
 import { Textarea } from "~/components/ui/textarea";
 
 const decisionSchema = z.discriminatedUnion("intent", [
+  z.object({
+    intent: z.literal("retry"),
+    refundId: z.coerce.number().int(),
+  }),
   z.object({
     intent: z.literal("approve"),
     refundRequestId: z.coerce.number().int(),
@@ -129,6 +140,61 @@ function getPendingRefunds() {
     .all();
 }
 
+function getFailedRefunds() {
+  const failed = db
+    .select({
+      refundId: refunds.id,
+      refundRequestId: refunds.refundRequestId,
+      learnerName: users.name,
+      courseTitle: courses.title,
+      amount: refunds.amount,
+    })
+    .from(refunds)
+    .innerJoin(refundRequests, eq(refunds.refundRequestId, refundRequests.id))
+    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.status, RefundStatus.Failed))
+    .orderBy(asc(refunds.id))
+    .all();
+
+  const attempts =
+    failed.length === 0
+      ? []
+      : db
+          .select()
+          .from(payoutAttempts)
+          .where(
+            inArray(
+              payoutAttempts.refundId,
+              failed.map((refund) => refund.refundId)
+            )
+          )
+          .orderBy(asc(payoutAttempts.id))
+          .all();
+
+  return failed
+    .map((refund) => {
+      const history = attempts
+        .filter((attempt) => attempt.refundId === refund.refundId)
+        .map(({ id, sentAt, settledAt, result, failureReason }) => ({
+          id,
+          sentAt,
+          settledAt,
+          result,
+          failureReason,
+        }));
+      const latest = history.at(-1);
+      return {
+        ...refund,
+        failedAt: latest?.settledAt ?? null,
+        failureReason: latest?.failureReason ?? null,
+        payoutAttempts: history,
+      };
+    })
+    .sort((a, b) => (a.failedAt ?? "").localeCompare(b.failedAt ?? ""));
+}
+
 export async function loader({ request }: Route.LoaderArgs) {
   const admin = await requireAdmin(request);
 
@@ -136,6 +202,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     adminId: admin.id,
     openRefundRequests: getOpenRefundRequests(),
     pendingRefunds: getPendingRefunds(),
+    failedRefunds: getFailedRefunds(),
   };
 }
 
@@ -147,6 +214,24 @@ export async function action({ request }: Route.ActionArgs) {
 
   if (!parsed.success) {
     return data({ errors: parsed.errors }, { status: 400 });
+  }
+
+  if (parsed.data.intent === "retry") {
+    try {
+      retryRefund(parsed.data.refundId);
+    } catch (error) {
+      if (error instanceof DecisionError) {
+        return data(
+          { errors: { refundId: error.message } },
+          { status: error.status }
+        );
+      }
+      throw error;
+    }
+    return {
+      success: true,
+      message: "Retrying. The refund is on its way to the Payment System again.",
+    };
   }
 
   try {
@@ -177,6 +262,21 @@ export async function action({ request }: Route.ActionArgs) {
 
 type OpenRefundRequest = Route.ComponentProps["loaderData"]["openRefundRequests"][number];
 
+type ActionData =
+  | { success: boolean; message: string }
+  | { errors: Record<string, string | undefined> };
+
+function useActionToast(state: string, result: ActionData | undefined) {
+  useEffect(() => {
+    if (state !== "idle" || !result) return;
+    if ("success" in result) toast.success(result.message);
+    if ("errors" in result) {
+      const firstError = Object.values(result.errors)[0];
+      if (firstError) toast.error(firstError);
+    }
+  }, [state, result]);
+}
+
 function DecisionForm({
   refundRequest,
   isOwnRequest,
@@ -189,14 +289,7 @@ function DecisionForm({
   const noteId = `note-${refundRequest.id}`;
   const busy = fetcher.state !== "idle";
 
-  useEffect(() => {
-    if (fetcher.state !== "idle" || !fetcher.data) return;
-    if ("success" in fetcher.data) toast.success(fetcher.data.message);
-    if ("errors" in fetcher.data) {
-      const firstError = Object.values(fetcher.data.errors)[0];
-      if (firstError) toast.error(firstError);
-    }
-  }, [fetcher.state, fetcher.data]);
+  useActionToast(fetcher.state, fetcher.data);
 
   if (isOwnRequest) {
     return (
@@ -238,7 +331,8 @@ function DecisionForm({
 }
 
 export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
-  const { adminId, openRefundRequests, pendingRefunds } = loaderData;
+  const { adminId, openRefundRequests, pendingRefunds, failedRefunds } =
+    loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -253,7 +347,8 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
       <div className="mb-8">
         <h1 className="text-3xl font-bold">Refunds</h1>
         <p className="mt-1 text-muted-foreground">
-          Decide Open Refund Requests and follow Pending Refunds
+          Decide Open Refund Requests, follow Pending Refunds and retry Failed
+          Refunds
         </p>
       </div>
 
@@ -352,7 +447,106 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
           </Card>
         )}
       </section>
+
+      <section className="mt-10">
+        <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold">
+          <XCircle className="size-4" />
+          Failed Refunds ({failedRefunds.length})
+        </h2>
+        {failedRefunds.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No Refunds have failed.
+          </p>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2">
+            {failedRefunds.map((refund) => (
+              <Card key={refund.refundId}>
+                <CardHeader>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium">{refund.learnerName}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {refund.courseTitle} · {formatPrice(refund.amount)}
+                      </p>
+                    </div>
+                    {refund.failedAt && (
+                      <span
+                        className="shrink-0 text-xs text-muted-foreground"
+                        suppressHydrationWarning
+                      >
+                        failed {formatRelativeTime(refund.failedAt)}
+                      </span>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <p className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                    {refund.failureReason ?? "No reason given."}
+                  </p>
+                  <PayoutAttemptHistory attempts={refund.payoutAttempts} />
+                  <RetryForm refundId={refund.refundId} />
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </section>
     </div>
+  );
+}
+
+type PayoutAttempt =
+  Route.ComponentProps["loaderData"]["failedRefunds"][number]["payoutAttempts"][number];
+
+function PayoutAttemptHistory({ attempts }: { attempts: PayoutAttempt[] }) {
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="text-left uppercase tracking-wider text-muted-foreground">
+          <th className="py-1 font-medium">Sent</th>
+          <th className="py-1 font-medium">Settled</th>
+          <th className="py-1 font-medium">Result</th>
+          <th className="py-1 font-medium">Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {attempts.map((attempt) => (
+          <tr key={attempt.id} className="border-t border-border">
+            <td className="py-1" suppressHydrationWarning>
+              {new Date(attempt.sentAt).toLocaleString()}
+            </td>
+            <td className="py-1" suppressHydrationWarning>
+              {attempt.settledAt
+                ? new Date(attempt.settledAt).toLocaleString()
+                : "—"}
+            </td>
+            <td className="py-1">{attempt.result ?? "pending"}</td>
+            <td className="py-1">{attempt.failureReason ?? "—"}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function RetryForm({ refundId }: { refundId: number }) {
+  const fetcher = useFetcher<typeof action>();
+  useActionToast(fetcher.state, fetcher.data);
+
+  return (
+    <fetcher.Form method="post">
+      <input type="hidden" name="refundId" value={refundId} />
+      <Button
+        type="submit"
+        name="intent"
+        value="retry"
+        size="sm"
+        disabled={fetcher.state !== "idle"}
+      >
+        <RotateCcw className="mr-1 size-4" />
+        Retry
+      </Button>
+    </fetcher.Form>
   );
 }
 
