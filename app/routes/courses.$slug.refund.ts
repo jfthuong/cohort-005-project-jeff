@@ -9,10 +9,10 @@ import {
   lessons,
   modules,
   purchases,
-  refunds,
+  refundRequests,
   users,
   videoWatchEvents,
-  RefundStatus,
+  RefundRequestStatus,
 } from "~/db/schema";
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
@@ -60,11 +60,11 @@ function getLessonIdsForCourse(courseId: number): number[] {
 function getOpenRefundRequest(purchaseId: number) {
   return db
     .select()
-    .from(refunds)
+    .from(refundRequests)
     .where(
       and(
-        eq(refunds.purchaseId, purchaseId),
-        eq(refunds.status, RefundStatus.Open)
+        eq(refundRequests.purchaseId, purchaseId),
+        eq(refundRequests.status, RefundRequestStatus.Open)
       )
     )
     .get();
@@ -92,18 +92,18 @@ function buildRefundRequestEmail(input: {
   learnerName: string;
   learnerEmail: string;
   courseTitle: string;
-  amount: number;
+  requestedAmount: number;
 }) {
   return {
     to: input.learnerEmail,
-    subject: `Refund requested — ${input.courseTitle}`,
+    subject: `Refund request received — ${input.courseTitle}`,
     body: [
       `Hi ${input.learnerName},`,
       "",
       `We have your refund request for "${input.courseTitle}".`,
-      `The refund is for ${formatPrice(input.amount)}, the amount you paid.`,
+      `Requested refund amount: ${formatPrice(input.requestedAmount)}, the amount you paid.`,
       "",
-      "Our team reviews every refund request by hand. You do not need to do anything else — we will email you again when it is done.",
+      "Our team reviews every refund request by hand. Receiving it does not mean your request has been approved.",
       "",
       "— The Cadence team",
     ].join("\n"),
@@ -207,10 +207,10 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   db
-    .insert(refunds)
+    .insert(refundRequests)
     .values({
       purchaseId: purchase.id,
-      status: RefundStatus.Open,
+      status: RefundRequestStatus.Open,
       reason: parsed.data.reason,
     })
     .returning()
@@ -220,7 +220,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     learnerName: learner.name,
     learnerEmail: learner.email,
     courseTitle: course.title,
-    amount: purchase.amountPaid,
+    requestedAmount: purchase.amountPaid,
   });
 
   console.log(

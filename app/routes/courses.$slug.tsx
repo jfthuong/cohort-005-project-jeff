@@ -16,10 +16,10 @@ import {
   courseRatings,
   purchases,
   coupons,
-  refunds,
+  refundRequests,
   videoWatchEvents,
   LessonProgressStatus,
-  RefundStatus,
+  RefundRequestStatus,
 } from "~/db/schema";
 import { eq, and, or, sql, inArray, isNotNull } from "drizzle-orm";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
@@ -381,12 +381,12 @@ function getPurchaseForCourse(userId: number, courseId: number) {
 
 function getOpenRefundRequest(purchaseId: number) {
   return db
-    .select({ id: refunds.id })
-    .from(refunds)
+    .select({ id: refundRequests.id })
+    .from(refundRequests)
     .where(
       and(
-        eq(refunds.purchaseId, purchaseId),
-        eq(refunds.status, RefundStatus.Open)
+        eq(refundRequests.purchaseId, purchaseId),
+        eq(refundRequests.status, RefundRequestStatus.Open)
       )
     )
     .get();
@@ -443,7 +443,7 @@ function asDayString(when: Date) {
  * What the learner is offered if they want their money back, or null if this
  * purchase cannot be refunded.
  */
-function getRefundOffer(userId: number, course: { id: number }) {
+function getRefundRequestOffer(userId: number, course: { id: number }) {
   const purchase = getPurchaseForCourse(userId, course.id);
 
   if (!purchase) return null;
@@ -482,7 +482,7 @@ function getRefundOffer(userId: number, course: { id: number }) {
 
   if (claimedSeat) return null;
 
-  return { amount: purchase.amountPaid, lastDayInWindow };
+  return { requestedAmount: purchase.amountPaid, lastDayInWindow };
 }
 
 const ratingSchema = z.object({
@@ -517,13 +517,18 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let progress = 0;
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
-  let refundOffer: { amount: number; lastDayInWindow: string } | null = null;
+  let refundRequestOffer: {
+    requestedAmount: number;
+    lastDayInWindow: string;
+  } | null = null;
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);
 
     if (enrolled) {
-      refundOffer = getRefundOffer(currentUserId, { id: course.id });
+      refundRequestOffer = getRefundRequestOffer(currentUserId, {
+        id: course.id,
+      });
 
       progress = calculateProgress(currentUserId, course.id, false);
 
@@ -567,7 +572,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     tierInfo,
     ratingSummary,
     userRating,
-    refundOffer,
+    refundRequestOffer,
   };
 }
 
@@ -668,7 +673,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     tierInfo,
     ratingSummary,
     userRating,
-    refundOffer,
+    refundRequestOffer,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -904,10 +909,10 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                     </Button>
                   </Link>
                   <RateCourse userRating={userRating} />
-                  {refundOffer && (
+                  {refundRequestOffer && (
                     <RequestRefund
                       slug={course.slug}
-                      amount={refundOffer.amount}
+                      amount={refundRequestOffer.requestedAmount}
                     />
                   )}
                 </>
