@@ -1,0 +1,394 @@
+import { useEffect, useState } from "react";
+import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
+import { toast } from "sonner";
+import { z } from "zod";
+import { asc, eq, sql } from "drizzle-orm";
+import { AlertTriangle, Clock, Receipt } from "lucide-react";
+import type { Route } from "./+types/admin.refunds";
+import { db } from "~/db";
+import {
+  courses,
+  payoutAttempts,
+  purchases,
+  refundRequests,
+  RefundRequestStatus,
+  refunds,
+  RefundStatus,
+  users,
+  UserRole,
+} from "~/db/schema";
+import { getCurrentUserId } from "~/lib/session";
+import { parseFormData } from "~/lib/validation";
+import {
+  DecisionError,
+  decideRefundRequest,
+  getWatchedSeconds,
+} from "~/lib/refunds.server";
+import { daysSince, formatPrice, formatRelativeTime } from "~/lib/utils";
+import { Button } from "~/components/ui/button";
+import { Card, CardContent, CardHeader } from "~/components/ui/card";
+import { Label } from "~/components/ui/label";
+import { Textarea } from "~/components/ui/textarea";
+
+const decisionSchema = z.discriminatedUnion("intent", [
+  z.object({
+    intent: z.literal("approve"),
+    refundRequestId: z.coerce.number().int(),
+    note: z.string().trim().optional(),
+  }),
+  z.object({
+    intent: z.literal("decline"),
+    refundRequestId: z.coerce.number().int(),
+    note: z
+      .string({ required_error: "Tell the learner why you are declining." })
+      .trim()
+      .min(1, "Tell the learner why you are declining."),
+  }),
+]);
+
+export function meta() {
+  return [
+    { title: "Refunds — Cadence" },
+    { name: "description", content: "Decide refund requests" },
+  ];
+}
+
+async function requireAdmin(request: Request) {
+  const currentUserId = await getCurrentUserId(request);
+
+  if (!currentUserId) {
+    throw data("Select a user from the DevUI panel to manage refunds.", {
+      status: 401,
+    });
+  }
+
+  const currentUser = db
+    .select()
+    .from(users)
+    .where(eq(users.id, currentUserId))
+    .get();
+
+  if (!currentUser || currentUser.role !== UserRole.Admin) {
+    throw data("Only admins can manage refunds.", { status: 403 });
+  }
+
+  return currentUser;
+}
+
+function getOpenRefundRequests() {
+  return db
+    .select({
+      id: refundRequests.id,
+      learnerId: users.id,
+      learnerName: users.name,
+      learnerEmail: users.email,
+      courseId: courses.id,
+      courseTitle: courses.title,
+      reason: refundRequests.reason,
+      amountPaid: purchases.amountPaid,
+      purchasedAt: purchases.createdAt,
+      requestedAt: refundRequests.requestedAt,
+    })
+    .from(refundRequests)
+    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refundRequests.status, RefundRequestStatus.Open))
+    .orderBy(asc(refundRequests.requestedAt), asc(refundRequests.id))
+    .all()
+    .map(({ purchasedAt, ...request }) => ({
+      ...request,
+      daysSincePurchase: daysSince(purchasedAt),
+      hoursWatched:
+        Math.round(
+          (getWatchedSeconds(request.learnerId, request.courseId) / 3600) * 10
+        ) / 10,
+    }));
+}
+
+function getPendingRefunds() {
+  const lastSentAt = sql<string>`max(${payoutAttempts.sentAt})`;
+  return db
+    .select({
+      refundId: refunds.id,
+      refundRequestId: refunds.refundRequestId,
+      learnerName: users.name,
+      courseTitle: courses.title,
+      amount: refunds.amount,
+      sentAt: lastSentAt,
+    })
+    .from(refunds)
+    .innerJoin(payoutAttempts, eq(payoutAttempts.refundId, refunds.id))
+    .innerJoin(refundRequests, eq(refunds.refundRequestId, refundRequests.id))
+    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.status, RefundStatus.Pending))
+    .groupBy(refunds.id)
+    .orderBy(asc(lastSentAt), asc(refunds.id))
+    .all();
+}
+
+export async function loader({ request }: Route.LoaderArgs) {
+  const admin = await requireAdmin(request);
+
+  return {
+    adminId: admin.id,
+    openRefundRequests: getOpenRefundRequests(),
+    pendingRefunds: getPendingRefunds(),
+  };
+}
+
+export async function action({ request }: Route.ActionArgs) {
+  const admin = await requireAdmin(request);
+
+  const formData = await request.formData();
+  const parsed = parseFormData(formData, decisionSchema);
+
+  if (!parsed.success) {
+    return data({ errors: parsed.errors }, { status: 400 });
+  }
+
+  try {
+    decideRefundRequest({
+      refundRequestId: parsed.data.refundRequestId,
+      adminId: admin.id,
+      decision: parsed.data.intent,
+      note: parsed.data.note || null,
+    });
+  } catch (error) {
+    if (error instanceof DecisionError) {
+      return data(
+        { errors: { refundRequestId: error.message } },
+        { status: error.status }
+      );
+    }
+    throw error;
+  }
+
+  return {
+    success: true,
+    message:
+      parsed.data.intent === "approve"
+        ? "Approved. The refund is on its way to the Payment System."
+        : "Declined. The learner has been emailed.",
+  };
+}
+
+type OpenRefundRequest = Route.ComponentProps["loaderData"]["openRefundRequests"][number];
+
+function DecisionForm({
+  refundRequest,
+  isOwnRequest,
+}: {
+  refundRequest: OpenRefundRequest;
+  isOwnRequest: boolean;
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const [note, setNote] = useState("");
+  const noteId = `note-${refundRequest.id}`;
+  const busy = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.state !== "idle" || !fetcher.data) return;
+    if ("success" in fetcher.data) toast.success(fetcher.data.message);
+    if ("errors" in fetcher.data) {
+      const firstError = Object.values(fetcher.data.errors)[0];
+      if (firstError) toast.error(firstError);
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  if (isOwnRequest) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        This is your own request — another Admin has to decide it.
+      </p>
+    );
+  }
+
+  return (
+    <fetcher.Form method="post" className="space-y-2">
+      <input type="hidden" name="refundRequestId" value={refundRequest.id} />
+      <Label htmlFor={noteId}>Note to the learner</Label>
+      <Textarea
+        id={noteId}
+        name="note"
+        rows={2}
+        value={note}
+        onChange={(event) => setNote(event.target.value)}
+        placeholder="Required when declining, optional when approving."
+      />
+      <div className="flex gap-2">
+        <Button type="submit" name="intent" value="approve" size="sm" disabled={busy}>
+          Approve
+        </Button>
+        <Button
+          type="submit"
+          name="intent"
+          value="decline"
+          size="sm"
+          variant="outline"
+          disabled={busy || note.trim() === ""}
+        >
+          Decline
+        </Button>
+      </div>
+    </fetcher.Form>
+  );
+}
+
+export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
+  const { adminId, openRefundRequests, pendingRefunds } = loaderData;
+
+  return (
+    <div className="mx-auto max-w-7xl p-6 lg:p-8">
+      <nav className="mb-6 text-sm text-muted-foreground">
+        <Link to="/" className="hover:text-foreground">
+          Home
+        </Link>
+        <span className="mx-2">/</span>
+        <span className="text-foreground">Refunds</span>
+      </nav>
+
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold">Refunds</h1>
+        <p className="mt-1 text-muted-foreground">
+          Decide Open Refund Requests and follow Pending Refunds
+        </p>
+      </div>
+
+      <section className="mb-10">
+        <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold">
+          <Receipt className="size-4" />
+          Open Refund Requests ({openRefundRequests.length})
+        </h2>
+        {openRefundRequests.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No refund requests are waiting on a Decision.
+          </p>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2">
+            {openRefundRequests.map((refundRequest) => (
+              <Card key={refundRequest.id}>
+                <CardHeader>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium">{refundRequest.learnerName}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {refundRequest.learnerEmail}
+                      </p>
+                    </div>
+                    <span
+                      className="shrink-0 text-xs text-muted-foreground"
+                      suppressHydrationWarning
+                    >
+                      waiting since {formatRelativeTime(refundRequest.requestedAt)}
+                    </span>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                    <dt className="text-muted-foreground">Course</dt>
+                    <dd>{refundRequest.courseTitle}</dd>
+                    <dt className="text-muted-foreground">Amount paid</dt>
+                    <dd>{formatPrice(refundRequest.amountPaid)}</dd>
+                    <dt className="text-muted-foreground">Since purchase</dt>
+                    <dd>
+                      {refundRequest.daysSincePurchase}{" "}
+                      {refundRequest.daysSincePurchase === 1 ? "day" : "days"}
+                    </dd>
+                    <dt className="text-muted-foreground">Hours watched</dt>
+                    <dd>{refundRequest.hoursWatched}</dd>
+                  </dl>
+                  <p className="rounded-md bg-muted/50 p-3 text-sm">
+                    {refundRequest.reason}
+                  </p>
+                  <DecisionForm
+                    refundRequest={refundRequest}
+                    isOwnRequest={refundRequest.learnerId === adminId}
+                  />
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section>
+        <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold">
+          <Clock className="size-4" />
+          Pending Refunds ({pendingRefunds.length})
+        </h2>
+        {pendingRefunds.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No Refunds are waiting on the Payment System.
+          </p>
+        ) : (
+          <Card>
+            <CardContent className="p-0">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border bg-muted/50 text-left text-xs uppercase tracking-wider text-muted-foreground">
+                    <th className="px-4 py-3 font-medium">Learner</th>
+                    <th className="px-4 py-3 font-medium">Course</th>
+                    <th className="px-4 py-3 font-medium">Amount</th>
+                    <th className="px-4 py-3 font-medium">Sent</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pendingRefunds.map((refund) => (
+                    <tr key={refund.refundId} className="border-b border-border last:border-0">
+                      <td className="px-4 py-3">{refund.learnerName}</td>
+                      <td className="px-4 py-3">{refund.courseTitle}</td>
+                      <td className="px-4 py-3">{formatPrice(refund.amount)}</td>
+                      <td className="px-4 py-3" suppressHydrationWarning>
+                        {formatRelativeTime(refund.sentAt)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+        )}
+      </section>
+    </div>
+  );
+}
+
+export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
+  let title = "Something went wrong";
+  let message = "An unexpected error occurred while loading refunds.";
+
+  if (isRouteErrorResponse(error)) {
+    if (error.status === 401) {
+      title = "Sign in required";
+      message =
+        typeof error.data === "string"
+          ? error.data
+          : "Please select a user from the DevUI panel.";
+    } else if (error.status === 403) {
+      title = "Access denied";
+      message =
+        typeof error.data === "string"
+          ? error.data
+          : "Only admins can access this page.";
+    } else {
+      title = `Error ${error.status}`;
+      message = typeof error.data === "string" ? error.data : error.statusText;
+    }
+  }
+
+  return (
+    <div className="flex min-h-[50vh] items-center justify-center p-6">
+      <div className="text-center">
+        <AlertTriangle className="mx-auto mb-4 size-12 text-muted-foreground" />
+        <h1 className="mb-2 text-2xl font-bold">{title}</h1>
+        <p className="mb-6 text-muted-foreground">{message}</p>
+        <Link to="/">
+          <Button>Go Home</Button>
+        </Link>
+      </div>
+    </div>
+  );
+}

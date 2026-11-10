@@ -11,6 +11,7 @@ import {
   CourseStatus,
   LessonProgressStatus,
   RefundRequestStatus,
+  RefundStatus,
   QuestionType,
   TeamMemberRole,
 } from "../app/db/schema";
@@ -77,8 +78,9 @@ async function seed() {
     DROP TABLE IF EXISTS coupons;
     DROP TABLE IF EXISTS team_members;
     DROP TABLE IF EXISTS teams;
-    DROP TABLE IF EXISTS refund_requests;
+    DROP TABLE IF EXISTS payout_attempts;
     DROP TABLE IF EXISTS refunds;
+    DROP TABLE IF EXISTS refund_requests;
     DROP TABLE IF EXISTS purchases;
     DROP TABLE IF EXISTS enrollments;
     DROP TABLE IF EXISTS lessons;
@@ -2776,13 +2778,64 @@ This course is still in draft while the cluster examples are rewritten against t
   db.insert(schema.refundRequests)
     .values({
       purchaseId: liamPurchase.id,
+      status: RefundRequestStatus.Declined,
+      reason: "Changed my mind.",
+      requestedAt: daysAgo(8),
+      resolvedAt: daysAgo(7),
+      resolvedByUserId: admin.id,
+      decisionNote:
+        "We need a little more detail about what didn't work for you.",
+    })
+    .run();
+  db.insert(schema.refundRequests)
+    .values({
+      purchaseId: liamPurchase.id,
       status: RefundRequestStatus.Open,
       reason: "Bought the wrong one, I meant the advanced course.",
       requestedAt: daysAgo(4),
     })
     .run();
 
-  console.log("Created Liam's Refund Request.");
+  console.log("Created Liam's Refund Requests (one Declined, one Open).");
+
+  // ─── Sophia's Pending Refund ───
+  // An Approved Refund Request whose Refund the Payment System is still
+  // sending, so the Pending list on /admin/refunds has a row.
+
+  const sophiaPurchase = db
+    .select()
+    .from(schema.purchases)
+    .where(eq(schema.purchases.userId, studentByEmail("sophia.davis@student.dev").id))
+    .get();
+  if (!sophiaPurchase) throw new Error("Sophia has no purchase to refund");
+  const [sophiaRequest] = db
+    .insert(schema.refundRequests)
+    .values({
+      purchaseId: sophiaPurchase.id,
+      status: RefundRequestStatus.Approved,
+      reason: "The course is too basic for me.",
+      amountRefunded: sophiaPurchase.amountPaid,
+      requestedAt: daysAgo(3),
+      resolvedAt: hoursAgo(2),
+      resolvedByUserId: admin.id,
+    })
+    .returning()
+    .all();
+  const [sophiaRefund] = db
+    .insert(schema.refunds)
+    .values({
+      refundRequestId: sophiaRequest.id,
+      amount: sophiaPurchase.amountPaid,
+      status: RefundStatus.Pending,
+      createdAt: hoursAgo(2),
+    })
+    .returning()
+    .all();
+  db.insert(schema.payoutAttempts)
+    .values({ refundId: sophiaRefund.id, sentAt: hoursAgo(2) })
+    .run();
+
+  console.log("Created Sophia's Pending Refund.");
 
   // ─── Flush watch events ───
   // Batched: the heartbeat makes these by far the largest table, and one
@@ -2837,6 +2890,9 @@ This course is still in draft while the cluster examples are rewritten against t
   );
   console.log(
     `  Teams: ${countRows(schema.teams)}, coupons: ${countRows(schema.coupons)} (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed)`
+  );
+  console.log(
+    `  Refund requests: ${countRows(schema.refundRequests)}, refunds: ${countRows(schema.refunds)}, payout attempts: ${countRows(schema.payoutAttempts)}`
   );
 }
 
