@@ -460,3 +460,223 @@ describe("learner settings", () => {
     expect(settings.decidedRefundRequests).toHaveLength(2);
   });
 });
+describe("the payout lifecycle", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function settlePayouts() {
+    vi.advanceTimersByTime(30_000);
+  }
+
+  function lastEmail() {
+    return vi.mocked(console.log).mock.calls.at(-1)![0] as string;
+  }
+
+  async function learnerSettingsStatus() {
+    signInAs(LEARNER);
+    const settings = await loadSettings();
+    signInAs(ADMIN);
+    return settings.decidedRefundRequests[0]?.status;
+  }
+
+  it("approve → sent: the Refund is Issued, access is removed and the learner is emailed", async () => {
+    const request = raiseRefundRequest();
+    await decide({ intent: "approve", refundRequestId: request.id });
+    expect(db.select().from(enrollments).all()).toHaveLength(1);
+
+    settlePayouts();
+
+    expect(db.select().from(refunds).get()?.status).toBe("issued");
+    expect(db.select().from(payoutAttempts).all()).toMatchObject([
+      { settledAt: expect.any(String), result: "sent", failureReason: null },
+    ]);
+    expect(db.select().from(enrollments).all()).toEqual([]);
+    expect(lastEmail()).toContain("to=lena@example.com");
+    expect(lastEmail()).toContain("Refund sent — Test course");
+    expect(await learnerSettingsStatus()).toBe("Approved — refund issued");
+    expect((await loadRefundsScreen()).pendingRefunds).toEqual([]);
+  });
+
+  it("approve → failed: the Refund is Failed, the request stays Approved and the learner keeps access", async () => {
+    paymentSystem.scriptOutcome({ status: "failed", reason: "Card expired" });
+    const request = raiseRefundRequest();
+    await decide({ intent: "approve", refundRequestId: request.id });
+
+    settlePayouts();
+
+    const refund = db.select().from(refunds).get()!;
+    expect(refund.status).toBe("failed");
+    expect(db.select().from(refundRequests).get()?.status).toBe(
+      RefundRequestStatus.Approved
+    );
+    expect(db.select().from(payoutAttempts).all()).toMatchObject([
+      { settledAt: expect.any(String), result: "failed", failureReason: "Card expired" },
+    ]);
+    expect(db.select().from(enrollments).all()).toHaveLength(1);
+    expect(lastEmail()).toContain("to=lena@example.com");
+    expect(lastEmail()).toContain("Refund failed — Test course");
+    expect(await learnerSettingsStatus()).toBe("Refund failed — we're on it");
+
+    const screen = await loadRefundsScreen();
+    expect(screen.pendingRefunds).toEqual([]);
+    expect(screen.failedRefunds).toMatchObject([
+      {
+        refundId: refund.id,
+        learnerName: "Lena Learner",
+        courseTitle: "Test course",
+        amount: 4500,
+        failureReason: "Card expired",
+      },
+    ]);
+  });
+
+  async function approveAndFail(reason = "Card expired") {
+    paymentSystem.scriptOutcome({ status: "failed", reason });
+    const request = raiseRefundRequest();
+    await decide({ intent: "approve", refundRequestId: request.id });
+    settlePayouts();
+    return db.select().from(refunds).get()!;
+  }
+
+  it("failed → retry → sent: a new Payout Attempt makes the Refund Pending, then Issued", async () => {
+    const refund = await approveAndFail();
+    const sendPayout = vi.spyOn(paymentSystem, "sendPayout");
+
+    const result = await decide({ intent: "retry", refundId: refund.id });
+
+    expect(result).toMatchObject({ success: true });
+    expect(sendPayout).toHaveBeenCalledExactlyOnceWith({
+      refundId: refund.id,
+      amount: 4500,
+    });
+    expect(db.select().from(refunds).get()?.status).toBe("pending");
+    expect(db.select().from(payoutAttempts).all()).toMatchObject([
+      { result: "failed", failureReason: "Card expired" },
+      { settledAt: null, result: null },
+    ]);
+    const screen = await loadRefundsScreen();
+    expect(screen.failedRefunds).toEqual([]);
+    expect(screen.pendingRefunds).toMatchObject([{ refundId: refund.id }]);
+
+    settlePayouts();
+
+    expect(db.select().from(refunds).get()?.status).toBe("issued");
+    expect(db.select().from(payoutAttempts).all()).toMatchObject([
+      { result: "failed", failureReason: "Card expired" },
+      { settledAt: expect.any(String), result: "sent", failureReason: null },
+    ]);
+    expect(db.select().from(enrollments).all()).toEqual([]);
+    expect(lastEmail()).toContain("Refund sent — Test course");
+    expect(await learnerSettingsStatus()).toBe("Approved — refund issued");
+  });
+
+  it("failed → retry → failed: the Refund is Failed again and the Admin sees every Payout Attempt", async () => {
+    vi.setSystemTime(new Date("2026-03-10T12:00:00.000Z"));
+    const refund = await approveAndFail("Card expired");
+    paymentSystem.scriptOutcome({ status: "failed", reason: "Account closed" });
+
+    await decide({ intent: "retry", refundId: refund.id });
+    settlePayouts();
+
+    expect(db.select().from(refunds).get()?.status).toBe("failed");
+    expect(db.select().from(enrollments).all()).toHaveLength(1);
+    expect(lastEmail()).toContain("Refund failed — Test course");
+    expect(await learnerSettingsStatus()).toBe("Refund failed — we're on it");
+    const screen = await loadRefundsScreen();
+    expect(screen.failedRefunds).toMatchObject([
+      {
+        refundId: refund.id,
+        failureReason: "Account closed",
+        payoutAttempts: [
+          {
+            sentAt: "2026-03-10T12:00:00.000Z",
+            settledAt: "2026-03-10T12:00:30.000Z",
+            result: "failed",
+            failureReason: "Card expired",
+          },
+          {
+            sentAt: "2026-03-10T12:00:30.000Z",
+            settledAt: "2026-03-10T12:01:00.000Z",
+            result: "failed",
+            failureReason: "Account closed",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("only a Failed Refund can be retried", async () => {
+    const request = raiseRefundRequest();
+    await decide({ intent: "approve", refundRequestId: request.id });
+    const refund = db.select().from(refunds).get()!;
+    const sendPayout = vi.spyOn(paymentSystem, "sendPayout");
+
+    expect(await decide({ intent: "retry", refundId: refund.id })).toMatchObject({
+      init: { status: 409 },
+    });
+    settlePayouts();
+    expect(await decide({ intent: "retry", refundId: refund.id })).toMatchObject({
+      init: { status: 409 },
+    });
+    expect(await decide({ intent: "retry", refundId: 999 })).toMatchObject({
+      init: { status: 404 },
+    });
+
+    expect(sendPayout).not.toHaveBeenCalled();
+    expect(db.select().from(payoutAttempts).all()).toHaveLength(1);
+  });
+
+  it.each([LEARNER, INSTRUCTOR])(
+    "anyone but an Admin gets a 403 when retrying (user %i)",
+    async (userId) => {
+      const refund = await approveAndFail();
+      signInAs(userId);
+
+      await expect(
+        decide({ intent: "retry", refundId: refund.id })
+      ).rejects.toMatchObject({ init: { status: 403 } });
+      expect(db.select().from(refunds).get()?.status).toBe("failed");
+    }
+  );
+
+  it("a Failed Refund can't be declined", async () => {
+    const refund = await approveAndFail();
+
+    const result = await decide({
+      intent: "decline",
+      refundRequestId: refund.refundRequestId,
+      note: "Changed our mind.",
+    });
+
+    expect(result).toMatchObject({ init: { status: 409 } });
+    expect(db.select().from(refundRequests).get()?.status).toBe(
+      RefundRequestStatus.Approved
+    );
+    expect(db.select().from(refunds).get()?.status).toBe("failed");
+  });
+
+  it("a result for a Payout Attempt that is already settled has no effect", async () => {
+    const onResult = vi.spyOn(paymentSystem, "onResult");
+    const request = raiseRefundRequest();
+    await decide({ intent: "approve", refundRequestId: request.id });
+    settlePayouts();
+    const report = onResult.mock.calls[0]![0];
+    const settled = db.select().from(payoutAttempts).all();
+    const emailsSent = vi.mocked(console.log).mock.calls.length;
+
+    report({
+      refundId: settled[0]!.refundId,
+      status: "failed",
+      reason: "Late duplicate",
+    });
+
+    expect(db.select().from(refunds).get()?.status).toBe("issued");
+    expect(db.select().from(payoutAttempts).all()).toEqual(settled);
+    expect(vi.mocked(console.log).mock.calls).toHaveLength(emailsSent);
+  });
+});
