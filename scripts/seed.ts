@@ -12,6 +12,7 @@ import {
   LessonProgressStatus,
   RefundRequestStatus,
   RefundStatus,
+  PayoutAttemptResult,
   QuestionType,
   TeamMemberRole,
 } from "../app/db/schema";
@@ -2798,9 +2799,10 @@ This course is still in draft while the cluster examples are rewritten against t
 
   console.log("Created Liam's Refund Requests (one Declined, one Open).");
 
-  // ─── Sophia's Pending Refund ───
-  // An Approved Refund Request whose Refund the Payment System is still
-  // sending, so the Pending list on /admin/refunds has a row.
+  // ─── Sophia's Failed Refund ───
+  // An Approved Refund Request whose payout the Payment System reported as
+  // failed, so an Admin can retry it from /admin/refunds. Seeding it Pending
+  // would leave it stuck: the in-memory mock never heard about it.
 
   const sophiaPurchase = db
     .select()
@@ -2826,16 +2828,22 @@ This course is still in draft while the cluster examples are rewritten against t
     .values({
       refundRequestId: sophiaRequest.id,
       amount: sophiaPurchase.amountPaid,
-      status: RefundStatus.Pending,
+      status: RefundStatus.Failed,
       createdAt: hoursAgo(2),
     })
     .returning()
     .all();
   db.insert(schema.payoutAttempts)
-    .values({ refundId: sophiaRefund.id, sentAt: hoursAgo(2) })
+    .values({
+      refundId: sophiaRefund.id,
+      sentAt: hoursAgo(2),
+      settledAt: hoursAgo(2),
+      result: PayoutAttemptResult.Failed,
+      failureReason: "Card expired",
+    })
     .run();
 
-  console.log("Created Sophia's Pending Refund.");
+  console.log("Created Sophia's Failed Refund.");
 
   // ─── Flush watch events ───
   // Batched: the heartbeat makes these by far the largest table, and one

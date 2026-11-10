@@ -10,4 +10,5 @@ Cadence has no real payment provider yet, but the Refund lifecycle (Pending → 
 ## Consequences
 
 - Every attempt to send a Refund is recorded with its time and its result, so Admins can see repeated failures before retrying.
+- Each payout carries its Payout Attempt's id, and the result echoes it back. A late or duplicate result therefore settles only the attempt it is for, and changes nothing once that attempt is settled.
 - Swapping in a real provider means writing one new `PaymentSystem` implementation plus its webhook endpoint. The domain code stays the same.

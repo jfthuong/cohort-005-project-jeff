@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
 import { toast } from "sonner";
 import { z } from "zod";
-import { asc, eq, inArray, sql } from "drizzle-orm";
+import { asc, eq, inArray } from "drizzle-orm";
 import {
   AlertTriangle,
   Clock,
@@ -26,8 +26,8 @@ import {
 import { getCurrentUserId } from "~/lib/session";
 import { parseFormData } from "~/lib/validation";
 import {
-  DecisionError,
   decideRefundRequest,
+  RefundActionError,
   getWatchedSeconds,
   retryRefund,
 } from "~/lib/refunds.server";
@@ -117,31 +117,9 @@ function getOpenRefundRequests() {
     }));
 }
 
-function getPendingRefunds() {
-  const lastSentAt = sql<string>`max(${payoutAttempts.sentAt})`;
-  return db
-    .select({
-      refundId: refunds.id,
-      refundRequestId: refunds.refundRequestId,
-      learnerName: users.name,
-      courseTitle: courses.title,
-      amount: refunds.amount,
-      sentAt: lastSentAt,
-    })
-    .from(refunds)
-    .innerJoin(payoutAttempts, eq(payoutAttempts.refundId, refunds.id))
-    .innerJoin(refundRequests, eq(refunds.refundRequestId, refundRequests.id))
-    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
-    .innerJoin(users, eq(purchases.userId, users.id))
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(eq(refunds.status, RefundStatus.Pending))
-    .groupBy(refunds.id)
-    .orderBy(asc(lastSentAt), asc(refunds.id))
-    .all();
-}
-
-function getFailedRefunds() {
-  const failed = db
+// Every Refund in one status, each with the history of its Payout Attempts.
+function getRefundsWithPayoutAttempts(status: RefundStatus) {
+  const rows = db
     .select({
       refundId: refunds.id,
       refundRequestId: refunds.refundRequestId,
@@ -154,44 +132,56 @@ function getFailedRefunds() {
     .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
     .innerJoin(users, eq(purchases.userId, users.id))
     .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(eq(refunds.status, RefundStatus.Failed))
+    .where(eq(refunds.status, status))
     .orderBy(asc(refunds.id))
     .all();
 
   const attempts =
-    failed.length === 0
+    rows.length === 0
       ? []
       : db
-          .select()
+          .select({
+            id: payoutAttempts.id,
+            refundId: payoutAttempts.refundId,
+            sentAt: payoutAttempts.sentAt,
+            settledAt: payoutAttempts.settledAt,
+            result: payoutAttempts.result,
+            failureReason: payoutAttempts.failureReason,
+          })
           .from(payoutAttempts)
           .where(
             inArray(
               payoutAttempts.refundId,
-              failed.map((refund) => refund.refundId)
+              rows.map((refund) => refund.refundId)
             )
           )
           .orderBy(asc(payoutAttempts.id))
           .all();
 
-  return failed
-    .map((refund) => {
-      const history = attempts
-        .filter((attempt) => attempt.refundId === refund.refundId)
-        .map(({ id, sentAt, settledAt, result, failureReason }) => ({
-          id,
-          sentAt,
-          settledAt,
-          result,
-          failureReason,
-        }));
-      const latest = history.at(-1);
-      return {
-        ...refund,
-        failedAt: latest?.settledAt ?? null,
-        failureReason: latest?.failureReason ?? null,
-        payoutAttempts: history,
-      };
-    })
+  return rows.map((refund) => {
+    const history = attempts
+      .filter((attempt) => attempt.refundId === refund.refundId)
+      .map(({ refundId: _refundId, ...attempt }) => attempt);
+    return { ...refund, payoutAttempts: history, latestAttempt: history.at(-1) };
+  });
+}
+
+function getPendingRefunds() {
+  return getRefundsWithPayoutAttempts(RefundStatus.Pending)
+    .map(({ latestAttempt, ...refund }) => ({
+      ...refund,
+      sentAt: latestAttempt?.sentAt ?? null,
+    }))
+    .sort((a, b) => (a.sentAt ?? "").localeCompare(b.sentAt ?? ""));
+}
+
+function getFailedRefunds() {
+  return getRefundsWithPayoutAttempts(RefundStatus.Failed)
+    .map(({ latestAttempt, ...refund }) => ({
+      ...refund,
+      failedAt: latestAttempt?.settledAt ?? null,
+      failureReason: latestAttempt?.failureReason ?? null,
+    }))
     .sort((a, b) => (a.failedAt ?? "").localeCompare(b.failedAt ?? ""));
 }
 
@@ -206,6 +196,18 @@ export async function loader({ request }: Route.LoaderArgs) {
   };
 }
 
+// A rule the Refund action broke becomes a thrown response with its status.
+function throwingRefundActionErrors(run: () => void) {
+  try {
+    run();
+  } catch (error) {
+    if (error instanceof RefundActionError) {
+      throw data(error.message, { status: error.status });
+    }
+    throw error;
+  }
+}
+
 export async function action({ request }: Route.ActionArgs) {
   const admin = await requireAdmin(request);
 
@@ -216,45 +218,29 @@ export async function action({ request }: Route.ActionArgs) {
     return data({ errors: parsed.errors }, { status: 400 });
   }
 
-  if (parsed.data.intent === "retry") {
-    try {
-      retryRefund(parsed.data.refundId);
-    } catch (error) {
-      if (error instanceof DecisionError) {
-        return data(
-          { errors: { refundId: error.message } },
-          { status: error.status }
-        );
-      }
-      throw error;
-    }
+  const input = parsed.data;
+
+  if (input.intent === "retry") {
+    throwingRefundActionErrors(() => retryRefund(input.refundId));
     return {
       success: true,
       message: "Retrying. The refund is on its way to the Payment System again.",
     };
   }
 
-  try {
+  throwingRefundActionErrors(() =>
     decideRefundRequest({
-      refundRequestId: parsed.data.refundRequestId,
+      refundRequestId: input.refundRequestId,
       adminId: admin.id,
-      decision: parsed.data.intent,
-      note: parsed.data.note || null,
-    });
-  } catch (error) {
-    if (error instanceof DecisionError) {
-      return data(
-        { errors: { refundRequestId: error.message } },
-        { status: error.status }
-      );
-    }
-    throw error;
-  }
+      decision: input.intent,
+      note: input.note || null,
+    })
+  );
 
   return {
     success: true,
     message:
-      parsed.data.intent === "approve"
+      input.intent === "approve"
         ? "Approved. The refund is on its way to the Payment System."
         : "Declined. The learner has been emailed.",
   };
@@ -285,8 +271,12 @@ function DecisionForm({
   isOwnRequest: boolean;
 }) {
   const fetcher = useFetcher<typeof action>();
-  const [note, setNote] = useState("");
   const noteId = `note-${refundRequest.id}`;
+  const noteErrorId = `${noteId}-error`;
+  const noteError =
+    fetcher.state === "idle" && fetcher.data && "errors" in fetcher.data
+      ? fetcher.data.errors.note
+      : undefined;
   const busy = fetcher.state !== "idle";
 
   useActionToast(fetcher.state, fetcher.data);
@@ -307,10 +297,15 @@ function DecisionForm({
         id={noteId}
         name="note"
         rows={2}
-        value={note}
-        onChange={(event) => setNote(event.target.value)}
         placeholder="Required when declining, optional when approving."
+        aria-invalid={noteError ? true : undefined}
+        aria-describedby={noteError ? noteErrorId : undefined}
       />
+      {noteError && (
+        <p id={noteErrorId} className="text-sm text-destructive">
+          {noteError}
+        </p>
+      )}
       <div className="flex gap-2">
         <Button type="submit" name="intent" value="approve" size="sm" disabled={busy}>
           Approve
@@ -321,7 +316,7 @@ function DecisionForm({
           value="decline"
           size="sm"
           variant="outline"
-          disabled={busy || note.trim() === ""}
+          disabled={busy}
         >
           Decline
         </Button>
@@ -428,6 +423,7 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
                     <th className="px-4 py-3 font-medium">Course</th>
                     <th className="px-4 py-3 font-medium">Amount</th>
                     <th className="px-4 py-3 font-medium">Sent</th>
+                    <th className="px-4 py-3 font-medium">Payout Attempts</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -437,7 +433,18 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
                       <td className="px-4 py-3">{refund.courseTitle}</td>
                       <td className="px-4 py-3">{formatPrice(refund.amount)}</td>
                       <td className="px-4 py-3" suppressHydrationWarning>
-                        {formatRelativeTime(refund.sentAt)}
+                        {refund.sentAt ? formatRelativeTime(refund.sentAt) : "—"}
+                      </td>
+                      <td className="px-4 py-3">
+                        <details>
+                          <summary className="cursor-pointer text-muted-foreground">
+                            {refund.payoutAttempts.length}{" "}
+                            {refund.payoutAttempts.length === 1
+                              ? "attempt"
+                              : "attempts"}
+                          </summary>
+                          <PayoutAttemptHistory attempts={refund.payoutAttempts} />
+                        </details>
                       </td>
                     </tr>
                   ))}

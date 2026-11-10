@@ -1,5 +1,7 @@
 export interface Payout {
   refundId: number;
+  // Echoed back in the result, so a late result settles the attempt it is for.
+  payoutAttemptId: number;
   amount: number;
 }
 
@@ -7,7 +9,7 @@ export type PayoutOutcome =
   | { status: "sent" }
   | { status: "failed"; reason: string };
 
-export type PayoutResult = { refundId: number } & PayoutOutcome;
+export type PayoutResult = { payoutAttemptId: number } & PayoutOutcome;
 
 export type PayoutResultHandler = (result: PayoutResult) => void;
 
@@ -48,7 +50,7 @@ export class MockPaymentSystem implements PaymentSystem {
   sendPayout(payout: Payout) {
     const outcome = this.takeOutcome();
     setTimeout(() => {
-      this.handler?.({ refundId: payout.refundId, ...outcome });
+      this.handler?.({ payoutAttemptId: payout.payoutAttemptId, ...outcome });
     }, this.delayMs);
   }
 

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { sql, eq } from "drizzle-orm";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { RouterContextProvider } from "react-router";
 import {
@@ -107,6 +108,26 @@ function raiseRefundRequest({
     .get();
 }
 
+function present<T>(value: T | null | undefined, what: string): T {
+  if (value === null || value === undefined) throw new Error(`Expected ${what}`);
+  return value;
+}
+
+function theRefund() {
+  return present(db.select().from(refunds).get(), "a Refund");
+}
+
+function lastEmail() {
+  return String(vi.mocked(console.log).mock.calls.at(-1)?.[0]);
+}
+
+// Call before the first payout is sent: the Refund flow registers its result
+// handler on the Payment System then.
+function captureResultHandler() {
+  const onResult = vi.spyOn(paymentSystem, "onResult");
+  return () => present(onResult.mock.calls[0]?.[0], "a registered result handler");
+}
+
 beforeEach(() => {
   migrate(db, { migrationsFolder });
   db.insert(users)
@@ -185,29 +206,31 @@ describe("approving a Refund Request", () => {
 
     await decide({ intent: "approve", refundRequestId: request.id });
 
-    const refund = db.select().from(refunds).get();
+    const refund = theRefund();
     expect(refund).toMatchObject({
       refundRequestId: request.id,
       amount: 4500,
       status: "pending",
     });
-    expect(sendPayout).toHaveBeenCalledExactlyOnceWith({
-      refundId: refund!.id,
-      amount: 4500,
-    });
-    expect(db.select().from(payoutAttempts).all()).toMatchObject([
+    const attempts = db.select().from(payoutAttempts).all();
+    expect(attempts).toMatchObject([
       {
-        refundId: refund!.id,
+        refundId: refund.id,
         settledAt: null,
         result: null,
         failureReason: null,
       },
     ]);
+    expect(sendPayout).toHaveBeenCalledExactlyOnceWith({
+      refundId: refund.id,
+      payoutAttemptId: attempts[0].id,
+      amount: 4500,
+    });
 
     const screen = await loadRefundsScreen();
     expect(screen.openRefundRequests).toEqual([]);
     expect(screen.pendingRefunds).toMatchObject([
-      { refundId: refund!.id, learnerName: "Lena Learner", amount: 4500 },
+      { refundId: refund.id, learnerName: "Lena Learner", amount: 4500 },
     ]);
     expect(db.select().from(enrollments).all()).toHaveLength(1);
   });
@@ -228,18 +251,41 @@ describe("approving a Refund Request", () => {
       resolvedByUserId: ADMIN,
       decisionNote: "Sorry it wasn't the right fit.",
     });
-    expect(decided!.resolvedAt! >= before).toBe(true);
+    expect((decided?.resolvedAt ?? "") >= before).toBe(true);
 
-    const email = vi.mocked(console.log).mock.calls.at(-1)![0] as string;
+    const email = lastEmail();
     expect(email).toContain("to=lena@example.com");
     expect(email).toContain("Refund request approved — Test course");
     expect(email).toContain("$45.00");
     expect(email).toContain("Sorry it wasn't the right fit.");
   });
+
+  it("writes nothing and sends nothing if the first Payout Attempt can't be recorded", async () => {
+    const sendPayout = vi.spyOn(paymentSystem, "sendPayout");
+    const request = raiseRefundRequest();
+    db.run(sql`
+      CREATE TRIGGER reject_payout_attempts BEFORE INSERT ON payout_attempts
+      BEGIN SELECT RAISE(ABORT, 'payout_attempts unavailable'); END
+    `);
+
+    try {
+      await expect(
+        decide({ intent: "approve", refundRequestId: request.id })
+      ).rejects.toThrow("payout_attempts unavailable");
+    } finally {
+      db.run(sql`DROP TRIGGER reject_payout_attempts`);
+    }
+
+    expect(db.select().from(refunds).all()).toEqual([]);
+    expect(db.select().from(refundRequests).get()?.status).toBe(
+      RefundRequestStatus.Open
+    );
+    expect(sendPayout).not.toHaveBeenCalled();
+  });
 });
 
 describe("declining a Refund Request", () => {
-  it.each<Record<string, string>>([{}, { note: "   " }])(
+  it.each<Record<string, string>>([{}, { note: "" }, { note: "   " }])(
     "is rejected without a note (%o)",
     async (fields) => {
       const request = raiseRefundRequest();
@@ -279,7 +325,7 @@ describe("declining a Refund Request", () => {
     expect(db.select().from(refunds).all()).toEqual([]);
     expect(sendPayout).not.toHaveBeenCalled();
 
-    const email = vi.mocked(console.log).mock.calls.at(-1)![0] as string;
+    const email = lastEmail();
     expect(email).toContain("to=lena@example.com");
     expect(email).toContain("Refund request declined — Test course");
     expect(email).toContain("You have finished most of the course.");
@@ -316,13 +362,13 @@ describe("decision rules", () => {
       await decide({ intent: "approve", refundRequestId: request.id });
       const sendPayout = vi.spyOn(paymentSystem, "sendPayout");
 
-      const result = await decide({
-        intent,
-        refundRequestId: request.id,
-        note: "Second thoughts.",
-      });
-
-      expect(result).toMatchObject({ init: { status: 409 } });
+      await expect(
+        decide({
+          intent,
+          refundRequestId: request.id,
+          note: "Second thoughts.",
+        })
+      ).rejects.toMatchObject({ init: { status: 409 } });
       expect(db.select().from(refundRequests).get()?.status).toBe(
         RefundRequestStatus.Approved
       );
@@ -334,9 +380,9 @@ describe("decision rules", () => {
   it("an Admin can't decide their own Refund Request", async () => {
     const request = raiseRefundRequest({ userId: ADMIN });
 
-    const result = await decide({ intent: "approve", refundRequestId: request.id });
-
-    expect(result).toMatchObject({ init: { status: 403 } });
+    await expect(
+      decide({ intent: "approve", refundRequestId: request.id })
+    ).rejects.toMatchObject({ init: { status: 403 } });
     expect(db.select().from(refundRequests).get()?.status).toBe(
       RefundRequestStatus.Open
     );
@@ -473,10 +519,6 @@ describe("the payout lifecycle", () => {
     vi.advanceTimersByTime(30_000);
   }
 
-  function lastEmail() {
-    return vi.mocked(console.log).mock.calls.at(-1)![0] as string;
-  }
-
   async function learnerSettingsStatus() {
     signInAs(LEARNER);
     const settings = await loadSettings();
@@ -509,7 +551,7 @@ describe("the payout lifecycle", () => {
 
     settlePayouts();
 
-    const refund = db.select().from(refunds).get()!;
+    const refund = theRefund();
     expect(refund.status).toBe("failed");
     expect(db.select().from(refundRequests).get()?.status).toBe(
       RefundRequestStatus.Approved
@@ -540,7 +582,7 @@ describe("the payout lifecycle", () => {
     const request = raiseRefundRequest();
     await decide({ intent: "approve", refundRequestId: request.id });
     settlePayouts();
-    return db.select().from(refunds).get()!;
+    return theRefund();
   }
 
   it("failed → retry → sent: a new Payout Attempt makes the Refund Pending, then Issued", async () => {
@@ -550,12 +592,14 @@ describe("the payout lifecycle", () => {
     const result = await decide({ intent: "retry", refundId: refund.id });
 
     expect(result).toMatchObject({ success: true });
+    const attempts = db.select().from(payoutAttempts).all();
     expect(sendPayout).toHaveBeenCalledExactlyOnceWith({
       refundId: refund.id,
+      payoutAttemptId: attempts[1].id,
       amount: 4500,
     });
     expect(db.select().from(refunds).get()?.status).toBe("pending");
-    expect(db.select().from(payoutAttempts).all()).toMatchObject([
+    expect(attempts).toMatchObject([
       { result: "failed", failureReason: "Card expired" },
       { settledAt: null, result: null },
     ]);
@@ -613,19 +657,19 @@ describe("the payout lifecycle", () => {
   it("only a Failed Refund can be retried", async () => {
     const request = raiseRefundRequest();
     await decide({ intent: "approve", refundRequestId: request.id });
-    const refund = db.select().from(refunds).get()!;
+    const refund = theRefund();
     const sendPayout = vi.spyOn(paymentSystem, "sendPayout");
 
-    expect(await decide({ intent: "retry", refundId: refund.id })).toMatchObject({
-      init: { status: 409 },
-    });
+    await expect(
+      decide({ intent: "retry", refundId: refund.id })
+    ).rejects.toMatchObject({ init: { status: 409 } });
     settlePayouts();
-    expect(await decide({ intent: "retry", refundId: refund.id })).toMatchObject({
-      init: { status: 409 },
-    });
-    expect(await decide({ intent: "retry", refundId: 999 })).toMatchObject({
-      init: { status: 404 },
-    });
+    await expect(
+      decide({ intent: "retry", refundId: refund.id })
+    ).rejects.toMatchObject({ init: { status: 409 } });
+    await expect(
+      decide({ intent: "retry", refundId: 999 })
+    ).rejects.toMatchObject({ init: { status: 404 } });
 
     expect(sendPayout).not.toHaveBeenCalled();
     expect(db.select().from(payoutAttempts).all()).toHaveLength(1);
@@ -647,13 +691,14 @@ describe("the payout lifecycle", () => {
   it("a Failed Refund can't be declined", async () => {
     const refund = await approveAndFail();
 
-    const result = await decide({
-      intent: "decline",
-      refundRequestId: refund.refundRequestId,
-      note: "Changed our mind.",
-    });
+    await expect(
+      decide({
+        intent: "decline",
+        refundRequestId: refund.refundRequestId,
+        note: "Changed our mind.",
+      })
+    ).rejects.toMatchObject({ init: { status: 409 } });
 
-    expect(result).toMatchObject({ init: { status: 409 } });
     expect(db.select().from(refundRequests).get()?.status).toBe(
       RefundRequestStatus.Approved
     );
@@ -661,16 +706,15 @@ describe("the payout lifecycle", () => {
   });
 
   it("a result for a Payout Attempt that is already settled has no effect", async () => {
-    const onResult = vi.spyOn(paymentSystem, "onResult");
+    const resultHandler = captureResultHandler();
     const request = raiseRefundRequest();
     await decide({ intent: "approve", refundRequestId: request.id });
     settlePayouts();
-    const report = onResult.mock.calls[0]![0];
     const settled = db.select().from(payoutAttempts).all();
     const emailsSent = vi.mocked(console.log).mock.calls.length;
 
-    report({
-      refundId: settled[0]!.refundId,
+    resultHandler()({
+      payoutAttemptId: settled[0].id,
       status: "failed",
       reason: "Late duplicate",
     });
@@ -678,5 +722,84 @@ describe("the payout lifecycle", () => {
     expect(db.select().from(refunds).get()?.status).toBe("issued");
     expect(db.select().from(payoutAttempts).all()).toEqual(settled);
     expect(vi.mocked(console.log).mock.calls).toHaveLength(emailsSent);
+  });
+
+  it("a late result for an earlier Payout Attempt doesn't settle the retry", async () => {
+    const resultHandler = captureResultHandler();
+    const refund = await approveAndFail();
+    await decide({ intent: "retry", refundId: refund.id });
+    const before = db.select().from(payoutAttempts).all();
+    const emailsSent = vi.mocked(console.log).mock.calls.length;
+
+    resultHandler()({ payoutAttemptId: before[0].id, status: "sent" });
+
+    expect(theRefund().status).toBe("pending");
+    expect(db.select().from(payoutAttempts).all()).toEqual(before);
+    expect(before[1]).toMatchObject({ settledAt: null, result: null });
+    expect(db.select().from(enrollments).all()).toHaveLength(1);
+    expect(vi.mocked(console.log).mock.calls).toHaveLength(emailsSent);
+
+    settlePayouts();
+    expect(theRefund().status).toBe("issued");
+  });
+});
+
+describe("the Refunds screen filters", () => {
+  it("list each Pending and Failed Refund once, with its Payout Attempts, and leave out Issued ones", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+    try {
+      const issuedRequest = raiseRefundRequest({ reason: "Issued" });
+      await decide({ intent: "approve", refundRequestId: issuedRequest.id });
+      vi.advanceTimersByTime(30_000);
+
+      paymentSystem.scriptOutcome({ status: "failed", reason: "Card expired" });
+      const failedRequest = raiseRefundRequest({ reason: "Failed" });
+      await decide({ intent: "approve", refundRequestId: failedRequest.id });
+      vi.advanceTimersByTime(30_000);
+
+      paymentSystem.scriptOutcome({ status: "failed", reason: "Account closed" });
+      const retriedRequest = raiseRefundRequest({ reason: "Retried" });
+      await decide({ intent: "approve", refundRequestId: retriedRequest.id });
+      vi.advanceTimersByTime(30_000);
+      const retried = present(
+        db
+          .select()
+          .from(refunds)
+          .where(eq(refunds.refundRequestId, retriedRequest.id))
+          .get(),
+        "the retried Refund"
+      );
+      await decide({ intent: "retry", refundId: retried.id });
+
+      const pendingRequest = raiseRefundRequest({ reason: "Pending" });
+      await decide({ intent: "approve", refundRequestId: pendingRequest.id });
+
+      const screen = await loadRefundsScreen();
+
+      expect(screen.pendingRefunds).toMatchObject([
+        {
+          refundRequestId: retriedRequest.id,
+          payoutAttempts: [
+            { result: "failed", failureReason: "Account closed" },
+            { settledAt: null, result: null },
+          ],
+        },
+        {
+          refundRequestId: pendingRequest.id,
+          payoutAttempts: [{ settledAt: null, result: null }],
+        },
+      ]);
+      expect(screen.pendingRefunds).toHaveLength(2);
+      expect(screen.failedRefunds).toMatchObject([
+        {
+          refundRequestId: failedRequest.id,
+          failureReason: "Card expired",
+          payoutAttempts: [{ result: "failed", failureReason: "Card expired" }],
+        },
+      ]);
+      expect(screen.failedRefunds).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -24,13 +24,13 @@ describe("MockPaymentSystem", () => {
     const paymentSystem = new MockPaymentSystem({ delayMs: 30_000 });
     paymentSystem.onResult((result) => results.push(result));
 
-    paymentSystem.sendPayout({ refundId: 7, amount: 4900 });
+    paymentSystem.sendPayout({ refundId: 7, payoutAttemptId: 70, amount: 4900 });
 
     vi.advanceTimersByTime(29_999);
     expect(results).toEqual([]);
 
     vi.advanceTimersByTime(1);
-    expect(results).toEqual([{ refundId: 7, status: "sent" }]);
+    expect(results).toEqual([{ payoutAttemptId: 70, status: "sent" }]);
   });
 
   it("reports scripted outcomes for payouts in the order they are sent", () => {
@@ -39,15 +39,15 @@ describe("MockPaymentSystem", () => {
     paymentSystem.scriptOutcome({ status: "failed", reason: "Card expired" });
     paymentSystem.scriptOutcome({ status: "sent" });
 
-    paymentSystem.sendPayout({ refundId: 1, amount: 100 });
-    paymentSystem.sendPayout({ refundId: 2, amount: 200 });
-    paymentSystem.sendPayout({ refundId: 3, amount: 300 });
+    paymentSystem.sendPayout({ refundId: 1, payoutAttemptId: 1, amount: 100 });
+    paymentSystem.sendPayout({ refundId: 2, payoutAttemptId: 2, amount: 200 });
+    paymentSystem.sendPayout({ refundId: 3, payoutAttemptId: 3, amount: 300 });
     vi.advanceTimersByTime(1_000);
 
     expect(results).toEqual([
-      { refundId: 1, status: "failed", reason: "Card expired" },
-      { refundId: 2, status: "sent" },
-      { refundId: 3, status: "sent" },
+      { payoutAttemptId: 1, status: "failed", reason: "Card expired" },
+      { payoutAttemptId: 2, status: "sent" },
+      { payoutAttemptId: 3, status: "sent" },
     ]);
   });
 
@@ -58,18 +58,18 @@ describe("MockPaymentSystem", () => {
     paymentSystem.failNextPayout(true);
     expect(paymentSystem.isNextPayoutFailing()).toBe(true);
 
-    paymentSystem.sendPayout({ refundId: 1, amount: 100 });
+    paymentSystem.sendPayout({ refundId: 1, payoutAttemptId: 1, amount: 100 });
     expect(paymentSystem.isNextPayoutFailing()).toBe(false);
-    paymentSystem.sendPayout({ refundId: 2, amount: 200 });
+    paymentSystem.sendPayout({ refundId: 2, payoutAttemptId: 2, amount: 200 });
     vi.advanceTimersByTime(1_000);
 
     expect(results).toEqual([
       {
-        refundId: 1,
+        payoutAttemptId: 1,
         status: "failed",
         reason: "Payout declined by the Payment System",
       },
-      { refundId: 2, status: "sent" },
+      { payoutAttemptId: 2, status: "sent" },
     ]);
   });
 
@@ -77,14 +77,14 @@ describe("MockPaymentSystem", () => {
     const paymentSystem = new MockPaymentSystem({ delayMs: 1_000 });
     paymentSystem.onResult((result) => results.push(result));
 
-    paymentSystem.sendPayout({ refundId: 1, amount: 100 });
+    paymentSystem.sendPayout({ refundId: 1, payoutAttemptId: 1, amount: 100 });
     vi.advanceTimersByTime(1_000);
-    paymentSystem.sendPayout({ refundId: 2, amount: 200 });
+    paymentSystem.sendPayout({ refundId: 2, payoutAttemptId: 2, amount: 200 });
     vi.advanceTimersByTime(60_000);
 
     expect(results).toEqual([
-      { refundId: 1, status: "sent" },
-      { refundId: 2, status: "sent" },
+      { payoutAttemptId: 1, status: "sent" },
+      { payoutAttemptId: 2, status: "sent" },
     ]);
   });
 
@@ -92,11 +92,11 @@ describe("MockPaymentSystem", () => {
     const paymentSystem = new MockPaymentSystem();
     paymentSystem.onResult((result) => results.push(result));
 
-    paymentSystem.sendPayout({ refundId: 1, amount: 100 });
+    paymentSystem.sendPayout({ refundId: 1, payoutAttemptId: 1, amount: 100 });
     vi.advanceTimersByTime(29_999);
     expect(results).toEqual([]);
     vi.advanceTimersByTime(1);
-    expect(results).toEqual([{ refundId: 1, status: "sent" }]);
+    expect(results).toEqual([{ payoutAttemptId: 1, status: "sent" }]);
   });
 });
 
@@ -128,11 +128,11 @@ describe("getPaymentSystem", () => {
 
     setFailNextPayout(true);
     expect(isFailingNextPayout()).toBe(true);
-    mock.sendPayout({ refundId: 1, amount: 100 });
+    mock.sendPayout({ refundId: 1, payoutAttemptId: 1, amount: 100 });
     vi.runAllTimers();
     vi.useRealTimers();
 
     expect(isFailingNextPayout()).toBe(false);
-    expect(results[0]).toMatchObject({ refundId: 1, status: "failed" });
+    expect(results[0]).toMatchObject({ payoutAttemptId: 1, status: "failed" });
   });
 });

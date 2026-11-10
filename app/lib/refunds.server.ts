@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   courses,
@@ -18,13 +18,19 @@ import {
 import {
   getPaymentSystem,
   type PaymentSystem,
+  type Payout,
+  type PayoutOutcome,
   type PayoutResult,
 } from "~/lib/payment-system.server";
 import { formatPrice } from "~/lib/utils";
 
 export type Decision = "approve" | "decline";
 
-export class DecisionError extends Error {
+/**
+ * Why an Admin's Decision or retry can't go ahead. The route turns it into a
+ * thrown response with this status.
+ */
+export class RefundActionError extends Error {
   constructor(
     message: string,
     readonly status: 403 | 404 | 409
@@ -64,13 +70,27 @@ export function getWatchedSeconds(userId: number, courseId: number): number {
     .reduce((total, row) => total + row.furthest, 0);
 }
 
+type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 /**
- * Hands a Refund to the Payment System as a new Payout Attempt. Its result
- * comes back later through the Payment System's result callback.
+ * Records a new Payout Attempt for a Refund, inside the caller's transaction.
+ * Hand the returned Payout to sendPayout once that transaction has committed.
  */
-export function sendRefund(refund: { id: number; amount: number }) {
-  db.insert(payoutAttempts).values({ refundId: refund.id }).run();
-  paymentSystem().sendPayout({ refundId: refund.id, amount: refund.amount });
+function recordPayoutAttempt(
+  tx: Transaction,
+  refund: { id: number; amount: number }
+): Payout {
+  const attempt = tx
+    .insert(payoutAttempts)
+    .values({ refundId: refund.id })
+    .returning({ id: payoutAttempts.id })
+    .get();
+  return { refundId: refund.id, payoutAttemptId: attempt.id, amount: refund.amount };
+}
+
+// The result comes back later through the Payment System's result callback.
+function sendPayout(payout: Payout) {
+  paymentSystem().sendPayout(payout);
 }
 
 const systemsReportingToUs = new WeakSet<PaymentSystem>();
@@ -90,28 +110,30 @@ function handlePayoutResult(result: PayoutResult) {
   try {
     settleRefund(result);
   } catch (error) {
-    console.error(`[payments] could not settle refund ${result.refundId}`, error);
+    console.error(
+      `[payments] could not settle payout attempt ${result.payoutAttemptId}`,
+      error
+    );
   }
 }
 
 /**
- * Records what the Payment System reported for a Refund's latest unsettled
- * Payout Attempt. A result for an attempt that is already settled is ignored.
+ * Records what the Payment System reported for one Payout Attempt. A result
+ * for an attempt that is already settled, or unknown, is ignored.
  */
 function settleRefund(result: PayoutResult) {
   const sent = result.status === "sent";
 
   const settled = db.transaction((tx) => {
     const attempt = tx
-      .select({ id: payoutAttempts.id })
+      .select({ id: payoutAttempts.id, refundId: payoutAttempts.refundId })
       .from(payoutAttempts)
       .where(
         and(
-          eq(payoutAttempts.refundId, result.refundId),
+          eq(payoutAttempts.id, result.payoutAttemptId),
           isNull(payoutAttempts.settledAt)
         )
       )
-      .orderBy(desc(payoutAttempts.id))
       .get();
     if (!attempt) return null;
 
@@ -126,7 +148,7 @@ function settleRefund(result: PayoutResult) {
 
     tx.update(refunds)
       .set({ status: sent ? RefundStatus.Issued : RefundStatus.Failed })
-      .where(eq(refunds.id, result.refundId))
+      .where(eq(refunds.id, attempt.refundId))
       .run();
 
     const refund = tx
@@ -143,8 +165,11 @@ function settleRefund(result: PayoutResult) {
       .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
       .innerJoin(users, eq(purchases.userId, users.id))
       .innerJoin(courses, eq(purchases.courseId, courses.id))
-      .where(eq(refunds.id, result.refundId))
-      .get()!;
+      .where(eq(refunds.id, attempt.refundId))
+      .get();
+    if (!refund) {
+      throw new Error(`Refund ${attempt.refundId} has no learner or course`);
+    }
 
     // The learner loses access to the course only once the money has gone.
     if (sent) {
@@ -163,11 +188,7 @@ function settleRefund(result: PayoutResult) {
 
   if (!settled) return;
 
-  const email = buildPayoutEmail({
-    ...settled,
-    failureReason: result.status === "failed" ? result.reason : null,
-  });
-  console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);
+  logEmail(buildPayoutEmail({ ...settled, outcome: result }));
 }
 
 /**
@@ -175,25 +196,31 @@ function settleRefund(result: PayoutResult) {
  * Attempt. Only a Failed Refund can be retried.
  */
 export function retryRefund(refundId: number) {
-  const refund = db
-    .update(refunds)
-    .set({ status: RefundStatus.Pending })
-    .where(and(eq(refunds.id, refundId), eq(refunds.status, RefundStatus.Failed)))
-    .returning()
-    .get();
-
-  if (!refund) {
-    const exists = db
-      .select({ id: refunds.id })
-      .from(refunds)
-      .where(eq(refunds.id, refundId))
+  const payout = db.transaction((tx) => {
+    const refund = tx
+      .update(refunds)
+      .set({ status: RefundStatus.Pending })
+      .where(
+        and(eq(refunds.id, refundId), eq(refunds.status, RefundStatus.Failed))
+      )
+      .returning()
       .get();
-    throw exists
-      ? new DecisionError("Only a Failed Refund can be retried.", 409)
-      : new DecisionError("Refund not found.", 404);
-  }
 
-  sendRefund(refund);
+    if (!refund) {
+      const exists = tx
+        .select({ id: refunds.id })
+        .from(refunds)
+        .where(eq(refunds.id, refundId))
+        .get();
+      throw exists
+        ? new RefundActionError("Only a Failed Refund can be retried.", 409)
+        : new RefundActionError("Refund not found.", 404);
+    }
+
+    return recordPayoutAttempt(tx, refund);
+  });
+
+  sendPayout(payout);
 }
 
 function getRefundRequestForDecision(refundRequestId: number) {
@@ -229,18 +256,18 @@ export function decideRefundRequest(input: {
   const request = getRefundRequestForDecision(input.refundRequestId);
 
   if (!request) {
-    throw new DecisionError("Refund request not found.", 404);
+    throw new RefundActionError("Refund request not found.", 404);
   }
   if (request.learnerId === input.adminId) {
-    throw new DecisionError("You can't decide your own refund request.", 403);
+    throw new RefundActionError("You can't decide your own refund request.", 403);
   }
   if (request.status !== RefundRequestStatus.Open) {
-    throw new DecisionError("This refund request has already been decided.", 409);
+    throw new RefundActionError("This refund request has already been decided.", 409);
   }
 
   const approved = input.decision === "approve";
 
-  const refund = db.transaction((tx) => {
+  const payout = db.transaction((tx) => {
     const decided = tx
       .update(refundRequests)
       .set({
@@ -261,7 +288,7 @@ export function decideRefundRequest(input: {
       .run();
 
     if (decided.changes === 0) {
-      throw new DecisionError(
+      throw new RefundActionError(
         "This refund request has already been decided.",
         409
       );
@@ -269,7 +296,7 @@ export function decideRefundRequest(input: {
 
     if (!approved) return null;
 
-    return tx
+    const refund = tx
       .insert(refunds)
       .values({
         refundRequestId: request.id,
@@ -278,17 +305,23 @@ export function decideRefundRequest(input: {
       })
       .returning()
       .get();
+    return recordPayoutAttempt(tx, refund);
   });
 
-  if (refund) sendRefund(refund);
+  if (payout) sendPayout(payout);
 
-  const email = buildDecisionEmail({ ...request, approved, note: input.note });
+  logEmail(buildDecisionEmail({ ...request, approved, note: input.note }));
+}
+
+type Email = { to: string; subject: string; body: string };
+
+// There is no mail transport wired up yet, so emails go to the server log.
+function logEmail(email: Email) {
   console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);
 }
 
 /**
- * The email telling the learner about a Decision. There is no mail transport
- * wired up yet, so the built message goes to the server log.
+ * The email telling the learner about a Decision.
  */
 function buildDecisionEmail(input: {
   learnerName: string;
@@ -297,7 +330,7 @@ function buildDecisionEmail(input: {
   amountPaid: number;
   approved: boolean;
   note: string | null;
-}) {
+}): Email {
   const noteLines = input.note ? ["", "A note from our team:", input.note] : [];
   const body = input.approved
     ? [
@@ -328,16 +361,16 @@ function buildDecisionEmail(input: {
 
 /**
  * The email telling the learner what the Payment System reported for their
- * Refund. Like the Decision email, it goes to the server log.
+ * Refund.
  */
 function buildPayoutEmail(input: {
   learnerName: string;
   learnerEmail: string;
   courseTitle: string;
   amount: number;
-  failureReason: string | null;
-}) {
-  const sent = input.failureReason === null;
+  outcome: PayoutOutcome;
+}): Email {
+  const sent = input.outcome.status === "sent";
   const body = sent
     ? [
         `Hi ${input.learnerName},`,
