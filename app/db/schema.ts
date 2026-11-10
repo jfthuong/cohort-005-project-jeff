@@ -37,6 +37,17 @@ export enum RefundRequestStatus {
   Declined = "declined",
 }
 
+export enum RefundStatus {
+  Pending = "pending",
+  Issued = "issued",
+  Failed = "failed",
+}
+
+export enum PayoutAttemptResult {
+  Sent = "sent",
+  Failed = "failed",
+}
+
 export enum TeamMemberRole {
   Admin = "admin",
   Member = "member",
@@ -249,8 +260,46 @@ export const refundRequests = sqliteTable(
       .$defaultFn(() => new Date().toISOString()),
     resolvedAt: text("resolved_at"),
     resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+    // The Admin's note to the learner. Required when declining.
+    decisionNote: text("decision_note"),
   },
   (table) => [index("refund_requests_purchase_idx").on(table.purchaseId)]
+);
+
+// The money going back to the learner: one per Approved Refund Request.
+export const refunds = sqliteTable("refunds", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  refundRequestId: integer("refund_request_id")
+    .notNull()
+    .unique()
+    .references(() => refundRequests.id),
+  amount: integer("amount").notNull(),
+  status: text("status")
+    .notNull()
+    .$type<RefundStatus>()
+    .default(RefundStatus.Pending),
+  createdAt: text("created_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+});
+
+// Each time a Refund is handed to the Payment System, and what it reported.
+export const payoutAttempts = sqliteTable(
+  "payout_attempts",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    refundId: integer("refund_id")
+      .notNull()
+      .references(() => refunds.id),
+    sentAt: text("sent_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    // Null while the Payment System hasn't reported back.
+    settledAt: text("settled_at"),
+    result: text("result").$type<PayoutAttemptResult>(),
+    failureReason: text("failure_reason"),
+  },
+  (table) => [index("payout_attempts_refund_idx").on(table.refundId)]
 );
 
 export const teams = sqliteTable("teams", {

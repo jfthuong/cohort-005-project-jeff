@@ -183,7 +183,8 @@ describe("course refund requests", () => {
     const sqlite = new Database(":memory:");
     try {
       const migrations = readMigrationFiles({ migrationsFolder });
-      for (const migration of migrations.slice(0, -1)) {
+      const renameMigration = 11;
+      for (const migration of migrations.slice(0, renameMigration)) {
         for (const statement of migration.sql) sqlite.exec(statement);
       }
       sqlite.exec(`
@@ -210,7 +211,9 @@ describe("course refund requests", () => {
         .all();
       sqlite.pragma("foreign_keys = ON");
 
-      for (const statement of migrations.at(-1)!.sql) sqlite.exec(statement);
+      for (const statement of migrations[renameMigration].sql) {
+        sqlite.exec(statement);
+      }
 
       expect(
         sqlite.prepare("SELECT * FROM refund_requests ORDER BY id").all()

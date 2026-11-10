@@ -13,15 +13,17 @@ import { Textarea } from "~/components/ui/textarea";
 import {
   UserRole,
   RefundRequestStatus,
+  RefundStatus,
   users,
   courses,
   purchases,
   refundRequests,
+  refunds,
 } from "~/db/schema";
 import { AlertTriangle } from "lucide-react";
 import { data, isRouteErrorResponse, Link } from "react-router";
 import { db } from "~/db";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import { formatPrice } from "~/lib/utils";
 
 const settingsSchema = z.object({
@@ -75,6 +77,33 @@ export async function loader({ request }: Route.LoaderArgs) {
     )
     .all();
 
+  const decidedRefundRequests = db
+    .select({
+      id: refundRequests.id,
+      courseTitle: courses.title,
+      courseSlug: courses.slug,
+      requestStatus: refundRequests.status,
+      refundStatus: refunds.status,
+      note: refundRequests.decisionNote,
+      decidedAt: refundRequests.resolvedAt,
+    })
+    .from(refundRequests)
+    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .leftJoin(refunds, eq(refunds.refundRequestId, refundRequests.id))
+    .where(
+      and(
+        eq(purchases.userId, currentUserId),
+        ne(refundRequests.status, RefundRequestStatus.Open)
+      )
+    )
+    .orderBy(desc(refundRequests.resolvedAt), desc(refundRequests.id))
+    .all()
+    .map(({ requestStatus, refundStatus, ...decided }) => ({
+      ...decided,
+      status: decisionStatusLabel(requestStatus, refundStatus),
+    }));
+
   return {
     user: {
       id: currentUser.id,
@@ -84,7 +113,23 @@ export async function loader({ request }: Route.LoaderArgs) {
       role: currentUser.role,
     },
     openRefundRequests,
+    decidedRefundRequests,
   };
+}
+
+function decisionStatusLabel(
+  requestStatus: RefundRequestStatus,
+  refundStatus: RefundStatus | null
+) {
+  if (requestStatus === RefundRequestStatus.Declined) return "Declined";
+  switch (refundStatus) {
+    case RefundStatus.Issued:
+      return "Approved — refund issued";
+    case RefundStatus.Failed:
+      return "Refund failed — we're on it";
+    default:
+      return "Approved — refund on its way";
+  }
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -122,7 +167,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Settings({ loaderData }: Route.ComponentProps) {
-  const { user, openRefundRequests } = loaderData;
+  const { user, openRefundRequests, decidedRefundRequests } = loaderData;
   const fetcher = useFetcher();
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -209,15 +254,17 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
         </CardContent>
       </Card>
 
-      {openRefundRequests.length > 0 && (
+      {(openRefundRequests.length > 0 || decidedRefundRequests.length > 0) && (
         <Card className="mt-8 max-w-md">
           <CardHeader>
             <h2 className="text-lg font-semibold">Refund Requests</h2>
-            <p className="text-sm text-muted-foreground">
-              {openRefundRequests.length === 1
-                ? "One refund request is waiting on us."
-                : `${openRefundRequests.length} refund requests are waiting on us.`}
-            </p>
+            {openRefundRequests.length > 0 && (
+              <p className="text-sm text-muted-foreground">
+                {openRefundRequests.length === 1
+                  ? "One refund request is waiting on us."
+                  : `${openRefundRequests.length} refund requests are waiting on us.`}
+              </p>
+            )}
           </CardHeader>
           <CardContent className="space-y-4">
             {openRefundRequests.map((refundRequest) => (
@@ -238,6 +285,27 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
                   {new Date(refundRequest.requestedAt).toLocaleDateString()}
                 </p>
                 <p className="mt-2 text-sm">{refundRequest.reason}</p>
+              </div>
+            ))}
+            {decidedRefundRequests.map((decided) => (
+              <div key={decided.id} className="rounded-md border p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <Link
+                    to={`/courses/${decided.courseSlug}`}
+                    className="font-medium hover:underline"
+                  >
+                    {decided.courseTitle}
+                  </Link>
+                  <span className="shrink-0 rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium">
+                    {decided.status}
+                  </span>
+                </div>
+                {decided.decidedAt && (
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    decided {new Date(decided.decidedAt).toLocaleDateString()}
+                  </p>
+                )}
+                {decided.note && <p className="mt-2 text-sm">{decided.note}</p>}
               </div>
             ))}
           </CardContent>
