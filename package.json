@@ -17,6 +17,11 @@
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
     "db:seed": "tsx scripts/seed.ts",
+<<<<<<< HEAD
+=======
+    "seed-wayfinder-issues": "bash scripts/seed-wayfinder-issues.sh",
+    "seed-wayfinder-issues:ts": "tsx scripts/seed-wayfinder-issues.ts",
+>>>>>>> 44eca7f (#19: fix of seed-wayfinder-issues.sh to go through company proxy)
     "db:migrate": "drizzle-kit migrate",
     "loc": "git ls-files | grep -vE '(lock|.db|_snapshot.json)' | xargs wc -l"
   },
