@@ -2,9 +2,16 @@ import { Link } from "react-router";
 import type { Route } from "./+types/instructor.$courseId.students";
 import { getCurrentUserId } from "~/lib/session";
 import { UserRole } from "~/db/schema";
+import { isLapsed } from "~/lib/enrollments";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
-import { AlertTriangle, ArrowLeft, Users, Award } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Users,
+  Award,
+  NotebookPen,
+} from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { db } from "~/db";
 import {
@@ -16,9 +23,11 @@ import {
   quizzes,
   quizAttempts,
   lessonProgress,
+  purchases,
+  notes,
   LessonProgressStatus,
 } from "~/db/schema";
-import { eq, and, or, sql, desc } from "drizzle-orm";
+import { eq, and, or, sql, desc, inArray, isNull, max } from "drizzle-orm";
 
 function getUserById(id: number) {
   return db.select().from(users).where(eq(users.id, id)).get();
@@ -41,6 +50,44 @@ function getCourseEnrolledStudents(courseId: number) {
     .all();
 }
 
+// Students who lost their Enrollment keep their progress, so they still show
+// on the roster. They have no Enrollment, so their purchase date stands in.
+function getCourseLapsedStudents(courseId: number, enrolledUserIds: number[]) {
+  const lessonIds = getCourseLessonIds(courseId);
+  if (lessonIds.length === 0) return [];
+
+  const withProgress = db
+    .selectDistinct({ userId: lessonProgress.userId })
+    .from(lessonProgress)
+    .where(inArray(lessonProgress.lessonId, lessonIds))
+    .all()
+    .map((row) => row.userId)
+    .filter((userId) => !enrolledUserIds.includes(userId));
+
+  if (withProgress.length === 0) return [];
+
+  return db
+    .select({
+      userId: purchases.userId,
+      enrolledAt: max(purchases.createdAt),
+    })
+    .from(purchases)
+    .where(
+      and(
+        eq(purchases.courseId, courseId),
+        inArray(purchases.userId, withProgress)
+      )
+    )
+    .groupBy(purchases.userId)
+    .all()
+    .map((row) => ({
+      enrollmentId: null,
+      userId: row.userId,
+      enrolledAt: row.enrolledAt ?? "",
+      completedAt: null,
+    }));
+}
+
 function getQuizByLessonId(lessonId: number) {
   return db.select().from(quizzes).where(eq(quizzes.lessonId, lessonId)).get();
 }
@@ -55,6 +102,25 @@ function getBestAttempt(userId: number, quizId: number) {
     .orderBy(desc(quizAttempts.score))
     .limit(1)
     .get();
+}
+
+// Every note a learner has written on this course's lessons, so the
+// instructor can see what their students are stuck on.
+function getNotesForLearner(userId: number, lessonIds: number[]) {
+  if (lessonIds.length === 0) return [];
+
+  return db
+    .select({
+      id: notes.id,
+      body: notes.body,
+      updatedAt: notes.updatedAt,
+      lessonTitle: lessons.title,
+    })
+    .from(notes)
+    .innerJoin(lessons, eq(notes.lessonId, lessons.id))
+    .where(and(eq(notes.userId, userId), inArray(notes.lessonId, lessonIds)))
+    .orderBy(desc(notes.updatedAt))
+    .all();
 }
 
 function getCourseLessonIds(courseId: number): number[] {
@@ -183,7 +249,18 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   }
 
   // Get all enrolled students
-  const enrolledStudents = getCourseEnrolledStudents(courseId);
+  const enrolledStudents: {
+    enrollmentId: number | null;
+    userId: number;
+    enrolledAt: string;
+    completedAt: string | null;
+  }[] = getCourseEnrolledStudents(courseId);
+  enrolledStudents.push(
+    ...getCourseLapsedStudents(
+      courseId,
+      enrolledStudents.map((s) => s.userId)
+    )
+  );
 
   // Get all lessons with quizzes for this course
   const courseModules = db
@@ -245,8 +322,13 @@ export async function loader({ params, request }: Route.LoaderArgs) {
       email: studentUser?.email ?? "",
       enrolledAt: enrollment.enrolledAt,
       completedAt: enrollment.completedAt,
+      lapsed: isLapsed(enrollment),
       progress,
       quizScores,
+      notes: getNotesForLearner(
+        enrollment.userId,
+        allCourseLessons.map((lesson) => lesson.id)
+      ),
     };
   });
 
@@ -405,7 +487,11 @@ export default function InstructorStudentRoster({
                           {progressBar(student.progress)}
                         </td>
                         <td className="px-4 py-3">
-                          {student.completedAt ? (
+                          {student.lapsed ? (
+                            <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-400">
+                              Lapsed
+                            </span>
+                          ) : student.completedAt ? (
                             <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-400">
                               Completed
                             </span>
@@ -442,6 +528,41 @@ export default function InstructorStudentRoster({
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {/* Student Notes */}
+      {students.some((student) => student.notes.length > 0) && (
+        <div className="mt-8">
+          <h2 className="mb-3 flex items-center gap-2 text-lg font-semibold">
+            <NotebookPen className="size-4 text-muted-foreground" />
+            Student notes
+          </h2>
+          <p className="mb-4 text-sm text-muted-foreground">
+            What your students wrote down as they worked through the course.
+          </p>
+
+          <div className="space-y-4">
+            {students
+              .filter((student) => student.notes.length > 0)
+              .map((student) => (
+                <Card key={student.userId}>
+                  <CardContent className="space-y-3 py-4">
+                    <h3 className="text-sm font-semibold">{student.name}</h3>
+                    {student.notes.map((note) => (
+                      <div key={note.id} className="border-l-2 pl-3">
+                        <p className="text-xs text-muted-foreground">
+                          {note.lessonTitle}
+                        </p>
+                        <p className="whitespace-pre-wrap text-sm">
+                          {note.body}
+                        </p>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              ))}
+          </div>
+        </div>
       )}
     </div>
   );
