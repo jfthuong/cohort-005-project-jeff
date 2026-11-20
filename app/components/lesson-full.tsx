@@ -159,9 +159,6 @@ export function FullLesson({
             />
           )}
 
-          {/* Note — under the video, so the Student can write while they watch */}
-          {currentUserId && <LessonNote key={lesson.id} note={note} />}
-
           {/* Lesson Content */}
           {contentHtml && (
             <div
@@ -235,6 +232,9 @@ export function FullLesson({
               )}
             </div>
           )}
+
+          {/* Notes sit directly above Questions & Discussion so the two read as one section (#47) */}
+          {currentUserId && <LessonNote key={lesson.id} note={note} />}
 
           {/* Questions & Discussion — confidential to people with access */}
           <CommentThread
