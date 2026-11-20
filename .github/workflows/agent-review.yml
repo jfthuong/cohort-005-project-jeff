@@ -44,7 +44,7 @@ name: Agent — Review A Pull Request
 #   still a human's.
 #
 # WHAT IT NEEDS
-#   secrets.CLAUDE_CODE_OAUTH_TOKEN — the agent's auth token.
+#   secrets.COPILOT_GITHUB_TOKEN — the agent's auth token.
 #   secrets.FACTORY_PAT — the factory's one token. Only the steps that call
 #     GitHub get it; the agent's step does not. It pushes the review's
 #     commits and posts its verdict and inline comments, so it needs
@@ -160,8 +160,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+      - name: Install GitHub Copilot
+        run: npm install -g @github/copilot
 
       - name: Migrate and seed the database
         # The pre-commit hook runs on every commit the agent makes, and the
@@ -185,7 +185,7 @@ jobs:
 
       - name: Review the pull request
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           OUTPUT_DIR: ${{ runner.temp }}
         run: npx tsx .sandcastle/agent-workflows/review/review.ts
 

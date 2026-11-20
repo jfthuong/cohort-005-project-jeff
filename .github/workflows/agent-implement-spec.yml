@@ -63,7 +63,7 @@ name: Agent — Implement A Spec
 #
 # WHAT IT NEEDS
 #
-#   secrets.CLAUDE_CODE_OAUTH_TOKEN — the agent's auth token. Both agents are
+#   secrets.COPILOT_GITHUB_TOKEN — the agent's auth token. Both agents are
 #                               Sandcastle scripts in
 #                               .sandcastle/agent-workflows/implement-spec/.
 #   secrets.FACTORY_PAT       — a fine-grained PAT on this repository with
@@ -303,12 +303,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+      - name: Install GitHub Copilot
+        run: npm install -g @github/copilot
 
       - name: Decompose the spec into a queue
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           OUTPUT_DIR: ${{ runner.temp }}
         # Reads only. The queue comes back as queue.json, shaped and validated
         # by .sandcastle/agent-workflows/implement-spec/decomposition-schema.ts.
@@ -409,8 +409,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+      - name: Install GitHub Copilot
+        run: npm install -g @github/copilot
 
       - name: Migrate and seed the database
         run: |
@@ -474,7 +474,7 @@ jobs:
 
       - name: Build the ticket
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: npx tsx .sandcastle/agent-workflows/implement-spec/build.ts
 
       - name: Check the agent committed

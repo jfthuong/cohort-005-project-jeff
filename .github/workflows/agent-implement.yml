@@ -22,7 +22,7 @@ name: Agent — Implement A Ticket
 #   to it in prompt.md.
 #
 # WHAT IT NEEDS
-#   secrets.CLAUDE_CODE_OAUTH_TOKEN — the agent's auth token. To change the
+#   secrets.COPILOT_GITHUB_TOKEN — the agent's auth token. To change the
 #     agent or how it is billed, see
 #     .sandcastle/agent-workflows/shared/common.ts.
 #   secrets.FACTORY_PAT — a fine-grained PAT on this repository with Issues,
@@ -129,8 +129,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+      - name: Install GitHub Copilot
+        run: npm install -g @github/copilot
 
       - name: Migrate and seed the database
         # The agent gets a real database, because half of this repo's checks
@@ -184,7 +184,7 @@ jobs:
 
       - name: Build the ticket
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: npx tsx .sandcastle/agent-workflows/implement/implement.ts
 
       - name: Check the agent committed

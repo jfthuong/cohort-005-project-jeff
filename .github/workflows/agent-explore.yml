@@ -55,7 +55,7 @@ name: Agent — Explore The Tickets
 #   its prompt next to it in prompt.md.
 #
 # WHAT IT NEEDS
-#   secrets.CLAUDE_CODE_OAUTH_TOKEN — the agent's auth token.
+#   secrets.COPILOT_GITHUB_TOKEN — the agent's auth token.
 #   secrets.FACTORY_PAT — a fine-grained personal access token on this
 #     repository. Every call this workflow makes to GitHub uses it: listing
 #     the batch, posting the findings, moving the labels, closing duplicates.
@@ -158,14 +158,14 @@ jobs:
         if: steps.batch.outputs.numbers != '[]'
         run: npm ci
 
-      - name: Install Claude Code
+      - name: Install GitHub Copilot
         if: steps.batch.outputs.numbers != '[]'
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @github/copilot
 
       - name: Explore
         if: steps.batch.outputs.numbers != '[]'
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           OUTPUT_DIR: ${{ runner.temp }}
         # The plan comes back as plan.json, shaped and validated by
         # .sandcastle/agent-workflows/explore/plan-schema.ts.
