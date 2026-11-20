@@ -44,7 +44,21 @@ change to how the module stores its data leaves its tests alone.
 
 ## Keep files under 5000 tokens
 
-Keep every file under 5000 tokens.
+Keep every file under 5000 tokens. The pre-commit hook enforces it as a
+ratchet: a file already over the limit may not grow.
+
+## Code moved into a module ships with tests
+
+Moving code into a module makes it module behaviour, so it gets tests through
+the entry point like new code. "It had none before" does not carry over: the
+move itself can break the code, and the tests are what show it did not.
+
+## A module hides a lot behind a small interface
+
+Count what a caller must know: the entry points, their parameters, the order
+to call them in. A module that exposes about as many functions as it contains
+is shallow: it moved the complexity without hiding any. Merge entry points
+until each does a whole job. The vocabulary is in the `codebase-design` skill.
 
 ## Wrap related writes in a transaction
 
@@ -91,6 +105,12 @@ Anything the browser can read is public. A secret is read only in a
 
 Rendering is for working out what the output is, not for doing something.
 Anything that touches the outside world belongs in an effect or an action.
+
+## Text that changes after an action sits in a live region
+
+"Saved", an error, a running count: a screen reader reads changed text only
+from a live region (`<output>`, `role="status"`, `aria-live`). Tie it to the
+control it describes with `aria-describedby`.
 
 ## Derive, do not store
 

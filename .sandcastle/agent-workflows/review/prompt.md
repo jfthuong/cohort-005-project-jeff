@@ -7,9 +7,12 @@ Review it with the code-review skill, .agents/skills/code-review/SKILL.md:
 - spec: /tmp/review-spec.md
 - standards: CODING_STANDARDS.md
 
-Leave the human reviewer as little as possible. Fix every finding you can on
-`{{BRANCH}}`, and commit each fix through the pre-commit hook. The workflow
-pushes your commits. Leave `.github/` untouched.
+Leave the human reviewer as little as possible. Fix every finding on
+`{{BRANCH}}`, however large, and commit each fix through the pre-commit hook.
+Leave a finding only when it needs a person: a product decision, a judgement
+call no standard settles, a history rewrite, or access you do not have. Run
+`npm run format` before each commit: the hook checks formatting, it does not
+fix it. The workflow pushes your commits. Leave `.github/` untouched.
 
 Every finding you leave unfixed becomes an inline comment on its file and
 line. You will be asked for them as structured output.
@@ -18,7 +21,8 @@ Write your verdict on the branch, after your fixes, to /tmp/review-verdict.md:
 
     ## Standards: PASS | CHANGES REQUESTED
     One line of reasoning, then the findings, worst first: each one fixed
-    (its commit) or left (its file and line), citing the rule by heading.
+    (its commit) or left (its file and line, and which of those reasons
+    needs a person), citing the rule by heading.
 
     ## Spec: PASS | CHANGES REQUESTED
     One line of reasoning, then the findings, fixed or left.

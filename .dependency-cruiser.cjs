@@ -71,7 +71,11 @@ module.exports = {
         "No dependency cycles. Scope to `^${R}/` if you want to allow cycles outside packages.",
       severity: "error",
       from: {},
-      to: { circular: true },
+      // A cycle through `import type` only vanishes at runtime.
+      to: {
+        circular: true,
+        viaOnly: { dependencyTypesNot: ["type-only"] },
+      },
     },
 
     // --- Layering (optional, off by default) ----------------------------------
@@ -95,6 +99,14 @@ module.exports = {
       to: { path: ["^app/db/", "^node_modules/(drizzle-orm|better-sqlite3)/"] },
     },
     {
+      name: "modules-no-components",
+      comment:
+        "Modules hold behaviour; components render it. A module that imports a component (even a type) points the dependency the wrong way: define the type in the module and let the component import it.",
+      severity: "error",
+      from: { path: `^${R}/` },
+      to: { path: "^app/components/" },
+    },
+    {
       name: "components-no-db-connection",
       comment:
         "Components ship to the browser, so they may not open the database connection: it pulls better-sqlite3 into the client bundle and breaks hydration. Get data through a loader instead.",
@@ -106,6 +118,8 @@ module.exports = {
     },
   ],
   options: {
+    // Count `import type` too: a type import still points a dependency.
+    tsPreCompilationDeps: true,
     doNotFollow: { path: "node_modules" },
     tsConfig: { fileName: "tsconfig.json" },
     enhancedResolveOptions: {
