@@ -16,6 +16,7 @@ const { computeResult, getQuizWithQuestions } = await import("../quiz.server");
 
 let userId: number;
 let quizId: number;
+let lessonId: number;
 let questions: { id: number; correct: number; wrong: number }[];
 
 // ─── Fixtures ───
@@ -51,14 +52,14 @@ beforeEach(() => {
     .values({ courseId: base.course.id, title: "M", position: 1 })
     .returning()
     .get();
-  const lesson = db
+  lessonId = db
     .insert(schema.lessons)
     .values({ moduleId: mod.id, title: "L", position: 1 })
     .returning()
-    .get();
+    .get().id;
   quizId = db
     .insert(schema.quizzes)
-    .values({ lessonId: lesson.id, title: "Quiz", passingScore: 0.7 })
+    .values({ lessonId, title: "Quiz", passingScore: 0.7 })
     .returning()
     .get().id;
   // Inserted out of position order to check questions come back ordered.
@@ -84,6 +85,20 @@ describe("getQuizWithQuestions", () => {
         question.id,
       ]);
     }
+  });
+
+  it("returns a quiz with no questions yet", () => {
+    const emptyQuizId = db
+      .insert(schema.quizzes)
+      .values({ lessonId, title: "Empty", passingScore: 0.7 })
+      .returning()
+      .get().id;
+
+    expect(getQuizWithQuestions(emptyQuizId)?.questions).toEqual([]);
+    expect(computeResult(userId, emptyQuizId, {})).toMatchObject({
+      score: 0,
+      totalQuestions: 0,
+    });
   });
 
   it("is null for a quiz that does not exist", () => {
@@ -138,6 +153,35 @@ describe("computeResult", () => {
       score: 1,
       passed: true,
       grade: "A",
+    });
+  });
+
+  it("stores an attempt with no answers when the Student skips every question", () => {
+    const result = computeResult(userId, quizId, {});
+
+    expect(result).toMatchObject({ totalCorrect: 0, passed: false });
+    expect(db.select().from(schema.quizAttempts).all()).toHaveLength(1);
+    expect(db.select().from(schema.quizAnswers).all()).toEqual([]);
+  });
+
+  it("marks the first correct option when a question has several", () => {
+    const extra = db
+      .insert(schema.quizOptions)
+      .values({
+        questionId: questions[0].id,
+        optionText: "also",
+        isCorrect: true,
+      })
+      .returning()
+      .get();
+
+    const result = computeResult(userId, quizId, {
+      [questions[0].id]: extra.id,
+    });
+
+    expect(result?.questionResults[1]).toMatchObject({
+      correct: false,
+      correctOptionId: questions[0].correct,
     });
   });
 

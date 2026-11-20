@@ -17,18 +17,16 @@ export function getQuizWithQuestions(quizId: number) {
   if (!quiz) return null;
 
   const questions = getOrderedQuestions(quizId);
-  const options = questions.length
-    ? db
-        .select()
-        .from(quizOptions)
-        .where(
-          inArray(
-            quizOptions.questionId,
-            questions.map((question) => question.id)
-          )
-        )
-        .all()
-    : [];
+  const options = db
+    .select()
+    .from(quizOptions)
+    .where(
+      inArray(
+        quizOptions.questionId,
+        questions.map((question) => question.id)
+      )
+    )
+    .all();
 
   const questionsWithOptions = questions.map((question) => ({
     ...question,
@@ -49,8 +47,6 @@ function getOrderedQuestions(quizId: number) {
 
 function getCorrectOptionIds(questionIds: number[]) {
   const correctOptionIds = new Map<number, number>();
-  if (questionIds.length === 0) return correctOptionIds;
-
   const correctOptions = db
     .select({ id: quizOptions.id, questionId: quizOptions.questionId })
     .from(quizOptions)
