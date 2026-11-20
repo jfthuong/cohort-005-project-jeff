@@ -51,6 +51,31 @@ import { FullLesson } from "~/components/lesson-full";
 import { z } from "zod";
 import { parseFormData } from "~/lib/validation";
 
+const QUESTION_FIELD = /^question-(\d+)$/;
+
+// Answers arrive as fields named "question-{questionId}" whose value is the
+// chosen optionId.
+const submitQuizSchema = z
+  .object({ quizId: z.coerce.number().int().positive() })
+  .catchall(z.unknown())
+  .transform(({ quizId, ...fields }, context) => {
+    const answers: Record<number, number> = {};
+    for (const [key, value] of Object.entries(fields)) {
+      const match = QUESTION_FIELD.exec(key);
+      if (!match) continue;
+      const optionId = z.coerce.number().int().positive().safeParse(value);
+      if (!optionId.success) {
+        context.addIssue({
+          code: "custom",
+          message: `Invalid answer for ${key}`,
+        });
+        return z.NEVER;
+      }
+      answers[Number(match[1])] = optionId.data;
+    }
+    return { quizId, answers };
+  });
+
 const createCommentSchema = z.object({
   intent: z.literal("create-comment"),
   body: z.string(),
@@ -423,32 +448,21 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   if (intent === "mark-complete") {
-    markLessonComplete(currentUserId, lessonId);
+    markLessonComplete(currentUserId, lessonId, new Date());
     return { success: true };
   }
 
   if (intent === "submit-quiz") {
-    const quizId = Number(formData.get("quizId"));
-    if (isNaN(quizId)) {
-      throw data("Invalid quiz ID", { status: 400 });
+    const parsed = submitQuizSchema.safeParse(Object.fromEntries(formData));
+    if (!parsed.success) {
+      throw data("Invalid quiz submission", { status: 400 });
     }
+    const { quizId, answers: selectedAnswers } = parsed.data;
     // Scope the quiz to this lesson so a quiz elsewhere can't be reached by
     // posting its id to this route.
     const quiz = getQuizById(quizId);
     if (!quiz || quiz.lessonId !== lessonId) {
       throw data("Quiz not found", { status: 404 });
-    }
-
-    // Collect answers: form fields named "question-{questionId}" with value = optionId
-    const selectedAnswers: Record<number, number> = {};
-    for (const [key, value] of formData.entries()) {
-      if (key.startsWith("question-")) {
-        const questionId = Number(key.replace("question-", ""));
-        const optionId = Number(value);
-        if (!isNaN(questionId) && !isNaN(optionId)) {
-          selectedAnswers[questionId] = optionId;
-        }
-      }
     }
 
     const result = computeResult(currentUserId, quizId, selectedAnswers);
