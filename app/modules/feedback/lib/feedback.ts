@@ -23,7 +23,7 @@ function issueBody({ description, page }: Feedback) {
 function githubRepoFromRemote(remoteUrl: string) {
   const match = remoteUrl
     .trim()
-    .match(/github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/);
+    .match(/github\.com(?:-\w+)?[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/);
   return match ? match[1] : null;
 }
 
