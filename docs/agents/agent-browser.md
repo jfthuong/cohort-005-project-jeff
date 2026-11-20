@@ -7,10 +7,31 @@ built for exactly this — one command per action, an answer on stdout.
 
 ## Once, per machine
 
+The factory workflows install it before the agent starts; check with
+`which agent-browser` before installing it again.
+
 ```bash
 npm install -g agent-browser
 agent-browser install
 ```
+
+## Signing in as someone
+
+Most pages need a signed-in user. Pick one from the database, then sign in
+with the same request the DevUI panel sends:
+
+```bash
+# Students and the courses they are enrolled in (roles: student, instructor, admin)
+sqlite3 data.db "select u.id, u.name, c.slug from enrollments e
+  join users u on u.id = e.user_id join courses c on c.id = e.course_id
+  where u.role = 'student' limit 5"
+
+agent-browser open http://localhost:5173/
+agent-browser eval "fetch('/api/switch-user', { method: 'POST', body: new URLSearchParams({ userId: '5' }) }).then((r) => r.status)"
+```
+
+`200` means the session cookie is set; every page you open after it is seen
+by that user.
 
 ## Asking your own question
 

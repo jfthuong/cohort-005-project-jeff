@@ -11,8 +11,10 @@ Read CODING_STANDARDS.md.
 - Ship tests with the code. End with more passing tests than you started
   with, and none failing.
 - `npm run build` must pass too.
-- Commit with `git commit` on the current branch. When the pre-commit hook
-  rejects a commit, fix the work and commit again. The hook stays as it is:
+- Commit with `git commit` on the current branch. Run `npm run format` before
+  each commit: the hook checks formatting, it does not fix it. When the
+  pre-commit hook rejects a commit, fix the work and commit again. The hook
+  stays as it is:
   no `--no-verify`, no edits to `.husky/`, `scripts/pre-commit.sh` or
   `core.hooksPath`.
 - Finish with at least one commit and a clean working tree. The workflow
@@ -22,6 +24,7 @@ Read CODING_STANDARDS.md.
   PNGs in /tmp/evidence/.
 
 Write /tmp/pr-body.md in the voice of the `pr` skill: what the ticket asked
-for, what you built, what you deliberately left out. In its Evidence section,
-reference each screenshot by its absolute path, e.g.
-`![after](/tmp/evidence/after.png)`. The workflow uploads them.
+for, what you built, what you deliberately left out. Open it with every place
+the ticket and the existing code or its comments disagree, and which side you
+followed. In its Evidence section, reference each screenshot by its absolute
+path, e.g. `![after](/tmp/evidence/after.png)`. The workflow uploads them.

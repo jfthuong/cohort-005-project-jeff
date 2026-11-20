@@ -163,6 +163,13 @@ jobs:
       - name: Install GitHub Copilot
         run: npm install -g @github/copilot
 
+      - name: Install agent-browser
+        # The agent drives the app with it for screenshots and checks.
+        # Installing it here keeps the download out of the agent's turn.
+        run: |
+          npm install -g agent-browser
+          agent-browser install
+
       - name: Migrate and seed the database
         # The pre-commit hook runs on every commit the agent makes, and the
         # repo's checks need a database.
