@@ -18,7 +18,7 @@
 import zlib from "node:zlib";
 import type { RendererId } from "./agents";
 
-interface RenderInput {
+type RenderInput = {
   /** Human label for the capture, e.g. "Claude Code" or "Pi (ChatGPT)". */
   agent: string;
   renderer: RendererId;
@@ -32,7 +32,7 @@ interface RenderInput {
   /** The request's content-encoding header, if it had one. */
   requestEncoding?: string;
   responseRaw: string;
-}
+};
 
 const REDACT = new Set([
   "authorization",
@@ -59,7 +59,10 @@ export function decodeRequestBody(body: Buffer, encoding?: string): string {
   const kind = (encoding ?? "").trim().toLowerCase();
   if (kind === "" || kind === "identity") return body.toString("utf8");
 
-  if (kind === "zstd" && typeof (zlib as any).zstdDecompressSync !== "function") {
+  if (
+    kind === "zstd" &&
+    typeof (zlib as any).zstdDecompressSync !== "function"
+  ) {
     return decodeFailureWarning(
       body,
       `this body is zstd-compressed, but this proxy is running on Node ${process.version}, ` +
@@ -69,18 +72,22 @@ export function decodeRequestBody(body: Buffer, encoding?: string): string {
   }
 
   try {
-    if (kind === "zstd") return (zlib as any).zstdDecompressSync(body).toString("utf8");
+    if (kind === "zstd")
+      return (zlib as any).zstdDecompressSync(body).toString("utf8");
     if (kind === "gzip") return zlib.gunzipSync(body).toString("utf8");
     if (kind === "br") return zlib.brotliDecompressSync(body).toString("utf8");
     if (kind === "deflate") return zlib.inflateSync(body).toString("utf8");
-  } catch (err) {
+  } catch (error) {
     return decodeFailureWarning(
       body,
-      `this body claims content-encoding "${kind}" but did not decode as that: ${(err as Error).message}`
+      `this body claims content-encoding "${kind}" but did not decode as that: ${(error as Error).message}`
     );
   }
 
-  return decodeFailureWarning(body, `content-encoding "${kind}" is not one this tool decodes`);
+  return decodeFailureWarning(
+    body,
+    `content-encoding "${kind}" is not one this tool decodes`
+  );
 }
 
 function decodeFailureWarning(body: Buffer, reason: string): string {
@@ -92,7 +99,10 @@ function decodeFailureWarning(body: Buffer, reason: string): string {
 }
 
 export function renderMarkdown(input: RenderInput): string {
-  const requestText = decodeRequestBody(input.requestBody, input.requestEncoding);
+  const requestText = decodeRequestBody(
+    input.requestBody,
+    input.requestEncoding
+  );
 
   let reqJson: any = null;
   try {
@@ -107,8 +117,10 @@ export function renderMarkdown(input: RenderInput): string {
     [
       renderMeta(input, model),
       renderHeaders(input.headers),
-      "<request>\n\n" + renderRequest(input, reqJson, requestText) + "\n\n</request>",
-      "<response>\n\n" + renderResponse(input, reqJson) + "\n\n</response>",
+      "<request>\n\n" +
+        renderRequest(input, reqJson, requestText) +
+        "\n\n</request>",
+      "<response>\n\n" + renderResponse(input) + "\n\n</response>",
     ].join("\n\n") + "\n"
   );
 }
@@ -164,9 +176,12 @@ function fence(text: string, lang = ""): string {
  * down to plain text, preserving everything (only image base64 is placeheld). */
 function blockText(block: any): string {
   if (typeof block === "string") return block;
-  if (block?.type === "text" && typeof block.text === "string") return block.text;
-  if (block?.type === "input_text" && typeof block.text === "string") return block.text;
-  if (block?.type === "output_text" && typeof block.text === "string") return block.text;
+  if (block?.type === "text" && typeof block.text === "string")
+    return block.text;
+  if (block?.type === "input_text" && typeof block.text === "string")
+    return block.text;
+  if (block?.type === "output_text" && typeof block.text === "string")
+    return block.text;
   return "";
 }
 
@@ -194,9 +209,9 @@ function renderRequest(
     if (input.renderer === "anthropic") return renderAnthropicRequest(reqJson);
     if (input.renderer === "gemini") return renderGeminiRequest(reqJson);
     return renderOpenAIRequest(reqJson);
-  } catch (err) {
+  } catch (error) {
     return (
-      `<!-- renderer error, showing raw JSON: ${(err as Error).message} -->\n\n` +
+      `<!-- renderer error, showing raw JSON: ${(error as Error).message} -->\n\n` +
       fenceJson(reqJson)
     );
   }
@@ -207,8 +222,7 @@ function renderParams(reqJson: any, keys: string[]): string {
     .filter((k) => reqJson[k] !== undefined)
     .map((k) => {
       const v = reqJson[k];
-      const shown =
-        typeof v === "object" ? JSON.stringify(v) : String(v);
+      const shown = typeof v === "object" ? JSON.stringify(v) : String(v);
       return `- **${k}**: ${shown}`;
     });
   if (present.length === 0) return "";
@@ -235,9 +249,13 @@ function renderAnthropicRequest(j: any): string {
 
   if (j.system != null) {
     parts.push(
-      ["<system-prompt>", "", renderAnthropicSystem(j.system), "", "</system-prompt>"].join(
-        "\n"
-      )
+      [
+        "<system-prompt>",
+        "",
+        renderAnthropicSystem(j.system),
+        "",
+        "</system-prompt>",
+      ].join("\n")
     );
   }
 
@@ -323,7 +341,9 @@ function renderToolResultContent(content: any): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .map((b) => (b?.type === "image" ? imagePlaceholder(b) : blockText(b) || fenceJson(b)))
+      .map((b) =>
+        b?.type === "image" ? imagePlaceholder(b) : blockText(b) || fenceJson(b)
+      )
       .join("\n\n");
   }
   return fenceJson(content);
@@ -368,7 +388,19 @@ function renderOpenAIRequest(j: any): string {
   if (Array.isArray(j.messages)) {
     parts.push(renderMessages(j.messages, renderOpenAIChatContent));
   } else if (typeof j.input === "string") {
-    parts.push(["<messages>", "", "<message role=\"user\">", "", j.input, "", "</message>", "", "</messages>"].join("\n"));
+    parts.push(
+      [
+        "<messages>",
+        "",
+        '<message role="user">',
+        "",
+        j.input,
+        "",
+        "</message>",
+        "",
+        "</messages>",
+      ].join("\n")
+    );
   } else if (Array.isArray(j.input)) {
     parts.push(renderMessages(j.input, renderOpenAIResponsesContent));
   }
@@ -389,21 +421,25 @@ function renderOpenAITools(tools: any[]): string {
   return ["<tools>", "", rendered.join("\n\n"), "", "</tools>"].join("\n");
 }
 
-function renderOpenAIChatContent(msg: any): string {
+function renderOpenAIChatContent(message: any): string {
   // In chat/completions each element IS the message {role, content, tool_calls}.
   const out: string[] = [];
-  const content = msg.content;
+  const content = message.content;
   if (typeof content === "string") {
     out.push(content);
   } else if (Array.isArray(content)) {
     out.push(
       content
-        .map((b) => (b?.type === "image_url" ? "`[image_url]`" : blockText(b) || fenceJson(b)))
+        .map((b) =>
+          b?.type === "image_url"
+            ? "`[image_url]`"
+            : blockText(b) || fenceJson(b)
+        )
         .join("\n\n")
     );
   }
-  if (Array.isArray(msg.tool_calls)) {
-    for (const call of msg.tool_calls) {
+  if (Array.isArray(message.tool_calls)) {
+    for (const call of message.tool_calls) {
       const fn = call.function ?? {};
       out.push(
         [
@@ -416,10 +452,10 @@ function renderOpenAIChatContent(msg: any): string {
       );
     }
   }
-  if (msg.role === "tool") {
+  if (message.role === "tool") {
     out.push(
       [
-        `<tool-result tool-call-id="${msg.tool_call_id ?? ""}">`,
+        `<tool-result tool-call-id="${message.tool_call_id ?? ""}">`,
         "",
         typeof content === "string" ? content : fenceJson(content),
         "",
@@ -477,11 +513,15 @@ function renderOpenAIResponsesContent(item: any): string {
 // the two auth routes then share one code path.
 
 function unwrapGeminiRequest(j: any): any {
-  return j && typeof j.request === "object" && j.request !== null ? j.request : j;
+  return j && typeof j.request === "object" && j.request !== null
+    ? j.request
+    : j;
 }
 
 function unwrapGeminiResponse(j: any): any {
-  return j && typeof j.response === "object" && j.response !== null ? j.response : j;
+  return j && typeof j.response === "object" && j.response !== null
+    ? j.response
+    : j;
 }
 
 function renderGeminiRequest(rawJson: any): string {
@@ -526,7 +566,10 @@ function renderGeminiRequest(rawJson: any): string {
   }
 
   parts.push(
-    renderMessages(Array.isArray(j.contents) ? j.contents : [], renderGeminiContent)
+    renderMessages(
+      Array.isArray(j.contents) ? j.contents : [],
+      renderGeminiContent
+    )
   );
 
   return parts.join("\n\n");
@@ -553,8 +596,8 @@ function renderGeminiTools(tools: any[]): string {
   return ["<tools>", "", rendered.join("\n\n"), "", "</tools>"].join("\n");
 }
 
-function renderGeminiContent(msg: any): string {
-  return renderGeminiParts(msg?.parts);
+function renderGeminiContent(message: any): string {
+  return renderGeminiParts(message?.parts);
 }
 
 function renderGeminiParts(parts: any): string {
@@ -632,8 +675,12 @@ function renderGeminiResponse(raw: string): string {
   if (finish) out.push(`- **finish reason**: ${finish}`);
   if (usage) out.push(`- **usage**: ${JSON.stringify(usage)}`);
   if (out.length) out.push("");
-  if (thinking) out.push(["<thinking>", "", thinking, "", "</thinking>"].join("\n"));
-  if (text) out.push(["<assistant-text>", "", text, "", "</assistant-text>"].join("\n"));
+  if (thinking)
+    out.push(["<thinking>", "", thinking, "", "</thinking>"].join("\n"));
+  if (text)
+    out.push(
+      ["<assistant-text>", "", text, "", "</assistant-text>"].join("\n")
+    );
   for (const call of toolCalls) {
     out.push(
       [
@@ -652,16 +699,16 @@ function renderGeminiResponse(raw: string): string {
 
 function renderMessages(
   messages: any[],
-  renderContent: (msg: any) => string
+  renderContent: (message: any) => string
 ): string {
   if (!Array.isArray(messages)) return "<messages></messages>";
-  const rendered = messages.map((msg, i) => {
-    const role = msg.role ?? msg.type ?? "unknown";
+  const rendered = messages.map((message, i) => {
+    const role = message.role ?? message.type ?? "unknown";
     // Anthropic: content lives on msg.content ; renderContent handles the shape.
     const inner =
       renderContent === renderAnthropicContent
-        ? renderAnthropicContent(msg.content)
-        : renderContent(msg);
+        ? renderAnthropicContent(message.content)
+        : renderContent(message);
     return [
       `<message index="${i + 1}" role="${role}">`,
       "",
@@ -670,14 +717,16 @@ function renderMessages(
       "</message>",
     ].join("\n");
   });
-  return ["<messages>", "", rendered.join("\n\n"), "", "</messages>"].join("\n");
+  return ["<messages>", "", rendered.join("\n\n"), "", "</messages>"].join(
+    "\n"
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Response rendering (reassembled from the streamed SSE)
 // ---------------------------------------------------------------------------
 
-function renderResponse(input: RenderInput, reqJson: any): string {
+function renderResponse(input: RenderInput): string {
   const raw = input.responseRaw;
   if (raw.trim().length === 0) return "_(empty response)_";
 
@@ -710,10 +759,10 @@ function renderResponse(input: RenderInput, reqJson: any): string {
     }
     if (input.renderer === "anthropic") return renderAnthropicResponse(raw);
     if (input.renderer === "gemini") return renderGeminiResponse(raw);
-    return renderOpenAIResponse(raw, reqJson);
-  } catch (err) {
+    return renderOpenAIResponse(raw);
+  } catch (error) {
     return (
-      `<!-- response renderer error, showing raw stream: ${(err as Error).message} -->\n\n` +
+      `<!-- response renderer error, showing raw stream: ${(error as Error).message} -->\n\n` +
       fence(raw)
     );
   }
@@ -738,7 +787,10 @@ function sseData(raw: string): any[] {
 
 function renderAnthropicResponse(raw: string): string {
   const events = sseData(raw);
-  const blocks: Record<number, { type: string; text: string; name?: string; id?: string }> = {};
+  const blocks: Record<
+    number,
+    { type: string; text: string; name?: string; id?: string }
+  > = {};
   let stopReason: string | undefined;
   let usage: any;
 
@@ -763,7 +815,8 @@ function renderAnthropicResponse(raw: string): string {
         if (ev.usage) usage = ev.usage;
         break;
       case "message_start":
-        if (ev.message?.usage) usage = { ...ev.message.usage, ...(usage ?? {}) };
+        if (ev.message?.usage)
+          usage = { ...ev.message.usage, ...(usage ?? {}) };
         break;
     }
   }
@@ -779,7 +832,9 @@ function renderAnthropicResponse(raw: string): string {
   for (const i of ordered) {
     const b = blocks[i];
     if (b.type === "text") {
-      parts.push(["<assistant-text>", "", b.text, "", "</assistant-text>"].join("\n"));
+      parts.push(
+        ["<assistant-text>", "", b.text, "", "</assistant-text>"].join("\n")
+      );
     } else if (b.type === "thinking") {
       parts.push(["<thinking>", "", b.text, "", "</thinking>"].join("\n"));
     } else if (b.type === "tool_use") {
@@ -798,10 +853,11 @@ function renderAnthropicResponse(raw: string): string {
   return parts.join("\n\n");
 }
 
-function renderOpenAIResponse(raw: string, reqJson: any): string {
+function renderOpenAIResponse(raw: string): string {
   const events = sseData(raw);
   const isResponses = events.some(
-    (e) => typeof e.type === "string" && e.type.startsWith("response.")
+    (event) =>
+      typeof event.type === "string" && event.type.startsWith("response.")
   );
 
   if (isResponses) return renderOpenAIResponsesStream(events);
@@ -810,7 +866,8 @@ function renderOpenAIResponse(raw: string, reqJson: any): string {
 
 function renderOpenAIChatStream(events: any[]): string {
   let text = "";
-  const toolCalls: Record<number, { name: string; args: string; id?: string }> = {};
+  const toolCalls: Record<number, { name: string; args: string; id?: string }> =
+    {};
   let finish: string | undefined;
   let usage: any;
 
@@ -824,7 +881,8 @@ function renderOpenAIChatStream(events: any[]): string {
         toolCalls[idx] ??= { name: "", args: "", id: tc.id };
         if (tc.id) toolCalls[idx].id = tc.id;
         if (tc.function?.name) toolCalls[idx].name += tc.function.name;
-        if (tc.function?.arguments) toolCalls[idx].args += tc.function.arguments;
+        if (tc.function?.arguments)
+          toolCalls[idx].args += tc.function.arguments;
       }
     }
     if (choice?.finish_reason) finish = choice.finish_reason;
@@ -835,8 +893,13 @@ function renderOpenAIChatStream(events: any[]): string {
   if (finish) parts.push(`- **finish reason**: ${finish}`);
   if (usage) parts.push(`- **usage**: ${JSON.stringify(usage)}`);
   if (parts.length) parts.push("");
-  if (text) parts.push(["<assistant-text>", "", text, "", "</assistant-text>"].join("\n"));
-  for (const idx of Object.keys(toolCalls).map(Number).sort((a, b) => a - b)) {
+  if (text)
+    parts.push(
+      ["<assistant-text>", "", text, "", "</assistant-text>"].join("\n")
+    );
+  for (const idx of Object.keys(toolCalls)
+    .map(Number)
+    .sort((a, b) => a - b)) {
     const tc = toolCalls[idx];
     parts.push(
       [
@@ -886,7 +949,10 @@ function renderOpenAIResponsesStream(events: any[]): string {
   if (status) parts.push(`- **status**: ${status}`);
   if (usage) parts.push(`- **usage**: ${JSON.stringify(usage)}`);
   if (parts.length) parts.push("");
-  if (text) parts.push(["<assistant-text>", "", text, "", "</assistant-text>"].join("\n"));
+  if (text)
+    parts.push(
+      ["<assistant-text>", "", text, "", "</assistant-text>"].join("\n")
+    );
   for (const key of Object.keys(toolCalls)) {
     const tc = toolCalls[key];
     parts.push(

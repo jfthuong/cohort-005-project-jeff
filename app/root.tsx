@@ -42,6 +42,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {/* oxlint-disable-next-line react/no-danger -- a constant script, not user input */}
         <script dangerouslySetInnerHTML={{ __html: darkModeScript }} />
         <Meta />
         <Links />
@@ -86,10 +87,14 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error)) {
     if (error.status === 404) {
       title = "Page not found";
-      message = "The page you're looking for doesn't exist or may have been moved.";
+      message =
+        "The page you're looking for doesn't exist or may have been moved.";
     } else {
       title = `Error ${error.status}`;
-      message = typeof error.data === "string" ? error.data : (error.statusText || message);
+      message =
+        typeof error.data === "string"
+          ? error.data
+          : error.statusText || message;
     }
   } else if (import.meta.env.DEV && error && error instanceof Error) {
     message = error.message;

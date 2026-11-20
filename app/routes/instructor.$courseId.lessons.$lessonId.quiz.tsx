@@ -2,12 +2,9 @@ import { useState } from "react";
 import { Link, useFetcher, useNavigate } from "react-router";
 import { toast } from "sonner";
 import type { Route } from "./+types/instructor.$courseId.lessons.$lessonId.quiz";
-import { getCurrentUserId } from "~/lib/session";
+import { coursePermissions } from "~/modules/permissions/course-permissions.server";
 import {
-  UserRole,
   QuestionType,
-  users,
-  courses,
   modules,
   lessons,
   quizzes,
@@ -50,12 +47,7 @@ import {
 } from "@hello-pangea/dnd";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
-import { parseFormData, parseParams } from "~/lib/validation";
-
-const quizParamsSchema = z.object({
-  courseId: z.coerce.number().int(),
-  lessonId: z.coerce.number().int(),
-});
+import { parseFormData } from "~/lib/validation";
 
 const wizardDataSchema = z.object({
   title: z.string().trim().min(1, "Quiz title is required."),
@@ -90,35 +82,27 @@ const quizActionSchema = z.discriminatedUnion("intent", [
 
 // ─── Types for wizard state ───
 
-interface WizardOption {
+type WizardOption = {
   id: string;
   text: string;
   isCorrect: boolean;
-}
+};
 
-interface WizardQuestion {
+type WizardQuestion = {
   id: string;
   text: string;
   type: QuestionType;
   options: WizardOption[];
-}
+};
 
-interface WizardState {
+type WizardState = {
   title: string;
   passingScore: number;
   questions: WizardQuestion[];
-}
+};
 
 function generateId() {
   return Math.random().toString(36).slice(2, 10);
-}
-
-function getUserById(id: number) {
-  return db.select().from(users).where(eq(users.id, id)).get();
-}
-
-function getCourseById(id: number) {
-  return db.select().from(courses).where(eq(courses.id, id)).get();
 }
 
 function getModuleById(id: number) {
@@ -177,27 +161,6 @@ function createQuiz(lessonId: number, title: string, passingScore: number) {
     .get();
 }
 
-function updateQuiz(
-  id: number,
-  title: string | null,
-  passingScore: number | null
-) {
-  const updates: Record<string, unknown> = {};
-  if (title !== null) updates.title = title;
-  if (passingScore !== null) updates.passingScore = passingScore;
-
-  if (Object.keys(updates).length === 0) {
-    return getQuizById(id);
-  }
-
-  return db
-    .update(quizzes)
-    .set(updates)
-    .where(eq(quizzes.id, id))
-    .returning()
-    .get();
-}
-
 function deleteQuiz(id: number) {
   // Cascade: delete answers -> attempts -> options -> questions -> quiz
   const questions = getQuestionsByQuiz(id);
@@ -227,26 +190,17 @@ function createQuestion(
 ) {
   const pos =
     position ??
-    db
+    (db
       .select({
         max: sql<number>`coalesce(max(${quizQuestions.position}), 0)`,
       })
       .from(quizQuestions)
       .where(eq(quizQuestions.quizId, quizId))
-      .get()!.max + 1;
+      .get()?.max ?? 0) + 1;
 
   return db
     .insert(quizQuestions)
     .values({ quizId, questionText, questionType, position: pos })
-    .returning()
-    .get();
-}
-
-function deleteQuestion(id: number) {
-  db.delete(quizOptions).where(eq(quizOptions.questionId, id)).run();
-  return db
-    .delete(quizQuestions)
-    .where(eq(quizQuestions.id, id))
     .returning()
     .get();
 }
@@ -278,50 +232,18 @@ export function meta({ loaderData }: Route.MetaArgs) {
 // ─── Loader ───
 
 export async function loader({ params, request }: Route.LoaderArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("Select a user from the DevUI panel.", { status: 401 });
-  }
-
-  const user = getUserById(currentUserId);
-  if (
-    !user ||
-    (user.role !== UserRole.Instructor && user.role !== UserRole.Admin)
-  ) {
-    throw data("Only instructors and admins can access this page.", {
-      status: 403,
-    });
-  }
-
-  const courseId = parseInt(params.courseId, 10);
-  if (isNaN(courseId)) {
-    throw data("Invalid course ID.", { status: 400 });
-  }
-
-  const course = getCourseById(courseId);
-  if (!course) {
-    throw data("Course not found.", { status: 404 });
-  }
-
-  if (course.instructorId !== currentUserId && user.role !== UserRole.Admin) {
-    throw data("You can only edit your own courses.", { status: 403 });
-  }
-
-  const lessonId = parseInt(params.lessonId, 10);
-  if (isNaN(lessonId)) {
-    throw data("Invalid lesson ID.", { status: 400 });
-  }
-
-  const lesson = getLessonById(lessonId);
-  if (!lesson) {
+  const { course } = await coursePermissions.requireCapability(
+    request,
+    "manage",
+    { courseId: params.courseId, lessonId: params.lessonId }
+  );
+  // requireCapability has checked this is a lesson in the course.
+  const lesson = getLessonById(Number(params.lessonId));
+  const mod = lesson && getModuleById(lesson.moduleId);
+  if (!lesson || !mod) {
     throw data("Lesson not found.", { status: 404 });
   }
-
-  const mod = getModuleById(lesson.moduleId);
-  if (!mod || mod.courseId !== courseId) {
-    throw data("Lesson not found in this course.", { status: 404 });
-  }
+  const lessonId = lesson.id;
 
   // Load existing quiz if present
   const existingQuizBasic = getQuizByLessonId(lessonId);
@@ -335,41 +257,12 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 // ─── Action ───
 
 export async function action({ params, request }: Route.ActionArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("You must be logged in.", { status: 401 });
-  }
-
-  const user = getUserById(currentUserId);
-  if (
-    !user ||
-    (user.role !== UserRole.Instructor && user.role !== UserRole.Admin)
-  ) {
-    throw data("Only instructors and admins can manage quizzes.", {
-      status: 403,
-    });
-  }
-
-  const { courseId, lessonId } = parseParams(params, quizParamsSchema);
-
-  const course = getCourseById(courseId);
-  if (
-    !course ||
-    (course.instructorId !== currentUserId && user.role !== UserRole.Admin)
-  ) {
-    throw data("Course not found or not yours.", { status: 403 });
-  }
-
-  const lesson = getLessonById(lessonId);
-  if (!lesson) {
-    throw data("Lesson not found.", { status: 404 });
-  }
-
-  const mod = getModuleById(lesson.moduleId);
-  if (!mod || mod.courseId !== courseId) {
-    throw data("Lesson not found in this course.", { status: 404 });
-  }
+  await coursePermissions.requireCapability(request, "manage", {
+    courseId: params.courseId,
+    lessonId: params.lessonId,
+  });
+  // requireCapability has checked this is a lesson in the course.
+  const lessonId = Number(params.lessonId);
 
   const formData = await request.formData();
   const parsed = parseFormData(formData, quizActionSchema);
@@ -483,7 +376,7 @@ function StepIndicator({
 export default function QuizBuilderWizard({
   loaderData,
 }: Route.ComponentProps) {
-  const { course, lesson, module: mod, existingQuiz } = loaderData;
+  const { course, lesson, existingQuiz } = loaderData;
   const fetcher = useFetcher();
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
@@ -517,7 +410,8 @@ export default function QuizBuilderWizard({
 
   // Toast on success
   const fetcherData = fetcher.data as
-    { success?: boolean; deleted?: boolean; error?: string } | undefined;
+    | { success?: boolean; deleted?: boolean; error?: string }
+    | undefined;
 
   if (fetcher.state === "idle" && fetcherData?.success) {
     if (fetcherData.deleted) {
@@ -545,8 +439,8 @@ export default function QuizBuilderWizard({
             <Input
               id="quizTitle"
               value={wizard.title}
-              onChange={(e) =>
-                setWizard((prev) => ({ ...prev, title: e.target.value }))
+              onChange={(event) =>
+                setWizard((prev) => ({ ...prev, title: event.target.value }))
               }
               placeholder="e.g. Module 1 Quiz"
             />
@@ -559,10 +453,10 @@ export default function QuizBuilderWizard({
               min={0}
               max={100}
               value={wizard.passingScore}
-              onChange={(e) =>
+              onChange={(event) =>
                 setWizard((prev) => ({
                   ...prev,
-                  passingScore: parseInt(e.target.value, 10) || 0,
+                  passingScore: parseInt(event.target.value, 10) || 0,
                 }))
               }
               className="max-w-32"
@@ -698,9 +592,9 @@ export default function QuizBuilderWizard({
                             <div className="flex-1 space-y-3">
                               <Input
                                 value={q.text}
-                                onChange={(e) =>
+                                onChange={(event) =>
                                   updateQuestion(q.id, {
-                                    text: e.target.value,
+                                    text: event.target.value,
                                   })
                                 }
                                 placeholder="Enter question text..."
@@ -711,9 +605,9 @@ export default function QuizBuilderWizard({
                                 </Label>
                                 <Select
                                   value={q.type}
-                                  onValueChange={(val) =>
+                                  onValueChange={(value) =>
                                     updateQuestion(q.id, {
-                                      type: val as QuestionType,
+                                      type: value as QuestionType,
                                     })
                                   }
                                 >
@@ -878,9 +772,9 @@ export default function QuizBuilderWizard({
                       ) : (
                         <Input
                           value={opt.text}
-                          onChange={(e) =>
+                          onChange={(event) =>
                             updateOption(q.id, opt.id, {
-                              text: e.target.value,
+                              text: event.target.value,
                             })
                           }
                           placeholder="Enter option text..."
@@ -1025,8 +919,9 @@ export default function QuizBuilderWizard({
                   Please fix these issues before saving:
                 </p>
                 <ul className="list-inside list-disc space-y-1 text-sm text-destructive">
-                  {validationErrors.map((err, i) => (
-                    <li key={i}>{err}</li>
+                  {validationErrors.map((error, i) => (
+                    // oxlint-disable-next-line react/no-array-index-key -- messages can repeat, and the list is rebuilt on every render
+                    <li key={i}>{error}</li>
                   ))}
                 </ul>
               </div>
@@ -1180,11 +1075,11 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
           ? error.data
           : "Please select a user from the DevUI panel.";
     } else if (error.status === 403) {
-      title = "Access denied";
+      title = "Not allowed";
       message =
         typeof error.data === "string"
           ? error.data
-          : "You don't have permission to access this page.";
+          : "You aren't allowed to see this page.";
     } else {
       title = `Error ${error.status}`;
       message = typeof error.data === "string" ? error.data : error.statusText;

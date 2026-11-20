@@ -3,16 +3,23 @@ import { useFetcher } from "react-router";
 import { toast } from "sonner";
 import { z } from "zod";
 import type { Route } from "./+types/admin.categories";
-import { getCurrentUserId } from "~/lib/session";
+import { people } from "~/modules/permissions/person.server";
 import { parseFormData } from "~/lib/validation";
-import { UserRole, categories, courses, users } from "~/db/schema";
+import { categories, courses } from "~/db/schema";
 import { db } from "~/db";
 import { eq, sql } from "drizzle-orm";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Skeleton } from "~/components/ui/skeleton";
-import { AlertTriangle, BookOpen, Pencil, Plus, Tag, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  BookOpen,
+  Pencil,
+  Plus,
+  Tag,
+  Trash2,
+} from "lucide-react";
 import { data, isRouteErrorResponse, Link } from "react-router";
 
 const adminCategoryActionSchema = z.discriminatedUnion("intent", [
@@ -31,10 +38,6 @@ const adminCategoryActionSchema = z.discriminatedUnion("intent", [
   }),
 ]);
 
-function getUserById(id: number) {
-  return db.select().from(users).where(eq(users.id, id)).get();
-}
-
 function slugify(name: string) {
   return name
     .toLowerCase()
@@ -43,19 +46,11 @@ function slugify(name: string) {
 }
 
 function getCategoryBySlug(slug: string) {
-  return db
-    .select()
-    .from(categories)
-    .where(eq(categories.slug, slug))
-    .get();
+  return db.select().from(categories).where(eq(categories.slug, slug)).get();
 }
 
 function getCategoryByName(name: string) {
-  return db
-    .select()
-    .from(categories)
-    .where(eq(categories.name, name))
-    .get();
+  return db.select().from(categories).where(eq(categories.name, name)).get();
 }
 
 function getAllCategoriesWithCourseCounts() {
@@ -86,11 +81,7 @@ function createCategory(name: string) {
     throw new Error(`A category with the slug "${slug}" already exists.`);
   }
 
-  return db
-    .insert(categories)
-    .values({ name, slug })
-    .returning()
-    .get();
+  return db.insert(categories).values({ name, slug }).returning().get();
 }
 
 function updateCategory(id: number, name: string) {
@@ -128,11 +119,7 @@ function deleteCategory(id: number) {
     );
   }
 
-  return db
-    .delete(categories)
-    .where(eq(categories.id, id))
-    .returning()
-    .get();
+  return db.delete(categories).where(eq(categories.id, id)).returning().get();
 }
 
 export function meta() {
@@ -143,21 +130,7 @@ export function meta() {
 }
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("Select a user from the DevUI panel to manage categories.", {
-      status: 401,
-    });
-  }
-
-  const currentUser = getUserById(currentUserId);
-
-  if (!currentUser || currentUser.role !== UserRole.Admin) {
-    throw data("Only admins can access this page.", {
-      status: 403,
-    });
-  }
+  await people.requirePlatformAdmin(request);
 
   const categories = getAllCategoriesWithCourseCounts();
 
@@ -165,16 +138,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 }
 
 export async function action({ request }: Route.ActionArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("You must be logged in.", { status: 401 });
-  }
-
-  const currentUser = getUserById(currentUserId);
-  if (!currentUser || currentUser.role !== UserRole.Admin) {
-    throw data("Only admins can manage categories.", { status: 403 });
-  }
+  await people.requirePlatformAdmin(request);
 
   const formData = await request.formData();
   const parsed = parseFormData(formData, adminCategoryActionSchema);
@@ -192,9 +156,14 @@ export async function action({ request }: Route.ActionArgs) {
     try {
       createCategory(parsed.data.name);
       return { success: true, message: "Category created." };
-    } catch (e) {
+    } catch (error) {
       return data(
-        { error: e instanceof Error ? e.message : "Failed to create category." },
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to create category.",
+        },
         { status: 400 }
       );
     }
@@ -204,9 +173,14 @@ export async function action({ request }: Route.ActionArgs) {
     try {
       updateCategory(parsed.data.categoryId, parsed.data.name);
       return { success: true, message: "Category updated." };
-    } catch (e) {
+    } catch (error) {
       return data(
-        { error: e instanceof Error ? e.message : "Failed to update category." },
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to update category.",
+        },
         { status: 400 }
       );
     }
@@ -216,9 +190,14 @@ export async function action({ request }: Route.ActionArgs) {
     try {
       deleteCategory(parsed.data.categoryId);
       return { success: true, message: "Category deleted." };
-    } catch (e) {
+    } catch (error) {
       return data(
-        { error: e instanceof Error ? e.message : "Failed to delete category." },
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to delete category.",
+        },
         { status: 400 }
       );
     }
@@ -245,15 +224,15 @@ function CreateCategoryRow({ onClose }: { onClose: () => void }) {
     if (fetcher.state === "idle" && fetcher.data?.error) {
       toast.error(fetcher.data.error);
     }
+    // Run once per fetcher result. onClose is a new function on every parent
+    // render, and re-running on it would show the toast again.
+    // oxlint-disable-next-line react/exhaustive-deps
   }, [fetcher.state, fetcher.data]);
 
   function handleSave() {
     const trimmed = name.trim();
     if (!trimmed) return;
-    fetcher.submit(
-      { intent: "create", name: trimmed },
-      { method: "post" }
-    );
+    fetcher.submit({ intent: "create", name: trimmed }, { method: "post" });
   }
 
   function handleCancel() {
@@ -261,11 +240,11 @@ function CreateCategoryRow({ onClose }: { onClose: () => void }) {
     onClose();
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter") {
-      e.preventDefault();
+  function handleKeyDown(event: React.KeyboardEvent) {
+    if (event.key === "Enter") {
+      event.preventDefault();
       handleSave();
-    } else if (e.key === "Escape") {
+    } else if (event.key === "Escape") {
       handleCancel();
     }
   }
@@ -277,7 +256,7 @@ function CreateCategoryRow({ onClose }: { onClose: () => void }) {
           ref={inputRef}
           type="text"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(event) => setName(event.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="Category name"
           className="h-8 text-sm"
@@ -376,11 +355,11 @@ function CategoryRow({
     setIsEditing(false);
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter") {
-      e.preventDefault();
+  function handleKeyDown(event: React.KeyboardEvent) {
+    if (event.key === "Enter") {
+      event.preventDefault();
       handleSave();
-    } else if (e.key === "Escape") {
+    } else if (event.key === "Escape") {
       handleCancel();
     }
   }
@@ -400,7 +379,7 @@ function CategoryRow({
             ref={nameInputRef}
             type="text"
             value={editName}
-            onChange={(e) => setEditName(e.target.value)}
+            onChange={(event) => setEditName(event.target.value)}
             onKeyDown={handleKeyDown}
             className="h-8 text-sm"
           />
@@ -466,10 +445,18 @@ function CategoryRow({
 function TableRowSkeleton() {
   return (
     <tr className="border-b border-border last:border-0">
-      <td className="px-4 py-3"><Skeleton className="h-4 w-28" /></td>
-      <td className="px-4 py-3"><Skeleton className="h-4 w-24" /></td>
-      <td className="px-4 py-3"><Skeleton className="h-4 w-8" /></td>
-      <td className="px-4 py-3"><Skeleton className="h-7 w-16" /></td>
+      <td className="px-4 py-3">
+        <Skeleton className="h-4 w-28" />
+      </td>
+      <td className="px-4 py-3">
+        <Skeleton className="h-4 w-24" />
+      </td>
+      <td className="px-4 py-3">
+        <Skeleton className="h-4 w-8" />
+      </td>
+      <td className="px-4 py-3">
+        <Skeleton className="h-7 w-16" />
+      </td>
     </tr>
   );
 }
@@ -488,14 +475,23 @@ export function HydrateFallback() {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-border bg-muted/50">
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">Name</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">Slug</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">Courses</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">Actions</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    Name
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    Slug
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    Courses
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    Actions
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {Array.from({ length: 4 }).map((_, i) => (
+                  // oxlint-disable-next-line react/no-array-index-key -- placeholders never reorder
                   <TableRowSkeleton key={i} />
                 ))}
               </tbody>
@@ -531,7 +527,8 @@ export default function AdminCategories({ loaderData }: Route.ComponentProps) {
       <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
         <Tag className="size-4" />
         <span>
-          {categories.length} {categories.length === 1 ? "category" : "categories"} total
+          {categories.length}{" "}
+          {categories.length === 1 ? "category" : "categories"} total
         </span>
       </div>
 
@@ -581,7 +578,9 @@ export default function AdminCategories({ loaderData }: Route.ComponentProps) {
                     {categories.map((category) => (
                       <CategoryRow key={category.id} category={category} />
                     ))}
-                    {isAdding && <CreateCategoryRow onClose={() => setIsAdding(false)} />}
+                    {isAdding && (
+                      <CreateCategoryRow onClose={() => setIsAdding(false)} />
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -607,15 +606,22 @@ export default function AdminCategories({ loaderData }: Route.ComponentProps) {
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   let title = "Something went wrong";
-  let message = "An unexpected error occurred while loading category management.";
+  let message =
+    "An unexpected error occurred while loading category management.";
 
   if (isRouteErrorResponse(error)) {
     if (error.status === 401) {
       title = "Sign in required";
-      message = typeof error.data === "string" ? error.data : "Please select a user from the DevUI panel.";
+      message =
+        typeof error.data === "string"
+          ? error.data
+          : "Please select a user from the DevUI panel.";
     } else if (error.status === 403) {
-      title = "Access denied";
-      message = typeof error.data === "string" ? error.data : "Only admins can access this page.";
+      title = "Not allowed";
+      message =
+        typeof error.data === "string"
+          ? error.data
+          : "Only Platform Admins can see this page.";
     } else {
       title = `Error ${error.status}`;
       message = typeof error.data === "string" ? error.data : error.statusText;

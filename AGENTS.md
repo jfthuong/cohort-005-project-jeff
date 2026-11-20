@@ -3,7 +3,23 @@
 Do these checks in this order before you report a change to `app/` as complete:
 
 1. `npm run typecheck`
-2. `npm run test`
+2. `npm run lint:boundaries`
+3. `npm run test`
+4. `npm run test:mutation`
+
+Or run the first three with `npm run check`.
+
+`npm run lint:oxlint` lints the whole repository with oxlint (`.oxlintrc.json`).
+
+Modules are deep modules: see [app/modules/README.md](./app/modules/README.md) before adding or importing one.
+
+### About agent-browser
+
+agent-browser lets you drive a real browser through the app from the
+terminal: open a page, click, and read the DOM back. Use it to check a change
+that `typecheck` and `test` cannot see, and to answer a question about the
+page yourself rather than asking the person you are working for. See
+`docs/agents/agent-browser.md`.
 
 ## When something breaks
 

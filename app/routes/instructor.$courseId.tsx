@@ -8,8 +8,9 @@ import {
   type DropResult,
 } from "@hello-pangea/dnd";
 import type { Route } from "./+types/instructor.$courseId";
-import { getCurrentUserId } from "~/lib/session";
-import { CourseStatus, UserRole } from "~/db/schema";
+import { coursePermissions } from "~/modules/permissions/course-permissions.server";
+import { markdown } from "~/lib/text";
+import { CourseStatus } from "~/db/schema";
 import { db } from "~/db";
 import {
   courses,
@@ -24,7 +25,7 @@ import {
   quizAttempts,
 } from "~/db/schema";
 import { eq, and, or, sql, desc, gt, gte } from "drizzle-orm";
-import { formatDuration, formatPrice } from "~/lib/utils";
+import { formatDuration } from "~/lib/utils";
 import { MonacoMarkdownEditor } from "~/components/monaco-markdown-editor";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
@@ -57,14 +58,10 @@ import {
 } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
-import { parseFormData, parseParams } from "~/lib/validation";
+import { parseFormData } from "~/lib/validation";
 
 function getUserById(id: number) {
   return db.select().from(users).where(eq(users.id, id)).get();
-}
-
-function getCourseById(id: number) {
-  return db.select().from(courses).where(eq(courses.id, id)).get();
 }
 
 function getCourseWithDetails(id: number) {
@@ -110,7 +107,7 @@ function getCourseWithDetails(id: number) {
       ? db
           .select()
           .from(lessons)
-          .where(or(...moduleIds.map((mid) => eq(lessons.moduleId, mid)))!)
+          .where(or(...moduleIds.map((mid) => eq(lessons.moduleId, mid))))
           .orderBy(lessons.position)
           .all()
       : [];
@@ -136,7 +133,7 @@ function getLessonCountForCourse(courseId: number) {
   const count = db
     .select({ count: sql<number>`count(*)` })
     .from(lessons)
-    .where(or(...courseModules.map((m) => eq(lessons.moduleId, m.id)))!)
+    .where(or(...courseModules.map((m) => eq(lessons.moduleId, m.id))))
     .get();
 
   return count?.count ?? 0;
@@ -167,7 +164,10 @@ function updateCourseSalesCopy(id: number, salesCopy: string) {
 
   return db
     .update(courses)
-    .set({ salesCopy, updatedAt: new Date().toISOString() })
+    .set({
+      salesCopy: markdown(salesCopy),
+      updatedAt: new Date().toISOString(),
+    })
     .where(eq(courses.id, id))
     .returning()
     .get();
@@ -211,11 +211,11 @@ function createModule(
 ) {
   const pos =
     position ??
-    db
+    (db
       .select({ max: sql<number>`coalesce(max(${modules.position}), 0)` })
       .from(modules)
       .where(eq(modules.courseId, courseId))
-      .get()!.max + 1;
+      .get()?.max ?? 0) + 1;
 
   return db
     .insert(modules)
@@ -272,18 +272,18 @@ function createLesson(
 ) {
   const pos =
     position ??
-    db
+    (db
       .select({ max: sql<number>`coalesce(max(${lessons.position}), 0)` })
       .from(lessons)
       .where(eq(lessons.moduleId, moduleId))
-      .get()!.max + 1;
+      .get()?.max ?? 0) + 1;
 
   return db
     .insert(lessons)
     .values({
       moduleId,
       title,
-      content,
+      content: content === null ? null : markdown(content),
       videoUrl,
       position: pos,
       durationMinutes,
@@ -391,7 +391,7 @@ function getCourseLessonIds(courseId: number): number[] {
   const courseLessons = db
     .select({ id: lessons.id })
     .from(lessons)
-    .where(or(...courseModules.map((m) => eq(lessons.moduleId, m.id)))!)
+    .where(or(...courseModules.map((m) => eq(lessons.moduleId, m.id))))
     .all();
 
   return courseLessons.map((l) => l.id);
@@ -413,7 +413,7 @@ function calculateProgress(
         durationMinutes: lessons.durationMinutes,
       })
       .from(lessons)
-      .where(or(...lessonIds.map((id) => eq(lessons.id, id)))!)
+      .where(or(...lessonIds.map((id) => eq(lessons.id, id))))
       .all();
 
     const totalDuration = courseLessons.reduce(
@@ -430,7 +430,7 @@ function calculateProgress(
         and(
           eq(lessonProgress.userId, userId),
           eq(lessonProgress.status, LessonProgressStatus.Completed),
-          or(...lessonIds.map((id) => eq(lessonProgress.lessonId, id)))!
+          or(...lessonIds.map((id) => eq(lessonProgress.lessonId, id)))
         )
       )
       .all();
@@ -451,7 +451,7 @@ function calculateProgress(
       and(
         eq(lessonProgress.userId, userId),
         eq(lessonProgress.status, LessonProgressStatus.Completed),
-        or(...lessonIds.map((id) => eq(lessonProgress.lessonId, id)))!
+        or(...lessonIds.map((id) => eq(lessonProgress.lessonId, id)))
       )
     )
     .get();
@@ -474,10 +474,6 @@ function getBestAttempt(userId: number, quizId: number) {
     .limit(1)
     .get();
 }
-
-const courseEditorParamsSchema = z.object({
-  courseId: z.coerce.number().int(),
-});
 
 const courseEditorActionSchema = z.discriminatedUnion("intent", [
   z.object({
@@ -551,38 +547,15 @@ export function meta({ loaderData }: Route.MetaArgs) {
 }
 
 export async function loader({ params, request }: Route.LoaderArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("Select a user from the DevUI panel to manage courses.", {
-      status: 401,
-    });
-  }
-
-  const user = getUserById(currentUserId);
-
-  if (
-    !user ||
-    (user.role !== UserRole.Instructor && user.role !== UserRole.Admin)
-  ) {
-    throw data("Only instructors and admins can access this page.", {
-      status: 403,
-    });
-  }
-
-  const courseId = parseInt(params.courseId, 10);
-  if (isNaN(courseId)) {
-    throw data("Invalid course ID.", { status: 400 });
-  }
+  const {
+    course: { id: courseId },
+  } = await coursePermissions.requireCapability(request, "manage", {
+    courseId: params.courseId,
+  });
 
   const course = getCourseWithDetails(courseId);
-
   if (!course) {
     throw data("Course not found.", { status: 404 });
-  }
-
-  if (course.instructorId !== currentUserId && user.role !== UserRole.Admin) {
-    throw data("You can only edit your own courses.", { status: 403 });
   }
 
   const lessonCount = getLessonCountForCourse(courseId);
@@ -643,32 +616,12 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 }
 
 export async function action({ params, request }: Route.ActionArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("You must be logged in.", { status: 401 });
-  }
-
-  const user = getUserById(currentUserId);
-  if (
-    !user ||
-    (user.role !== UserRole.Instructor && user.role !== UserRole.Admin)
-  ) {
-    throw data("Only instructors and admins can edit courses.", {
-      status: 403,
-    });
-  }
-
-  const { courseId } = parseParams(params, courseEditorParamsSchema);
-
-  const course = getCourseById(courseId);
-  if (!course) {
-    throw data("Course not found.", { status: 404 });
-  }
-
-  if (course.instructorId !== currentUserId && user.role !== UserRole.Admin) {
-    throw data("You can only edit your own courses.", { status: 403 });
-  }
+  const { course } = await coursePermissions.requireCapability(
+    request,
+    "manage",
+    { courseId: params.courseId }
+  );
+  const courseId = course.id;
 
   const formData = await request.formData();
   const parsed = parseFormData(formData, courseEditorActionSchema);
@@ -849,13 +802,7 @@ export async function action({ params, request }: Route.ActionArgs) {
   throw data("Invalid action.", { status: 400 });
 }
 
-function InlineEditableTitle({
-  value,
-  courseId,
-}: {
-  value: string;
-  courseId: number;
-}) {
+function InlineEditableTitle({ value }: { value: string; courseId: number }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState(value);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -898,11 +845,11 @@ function InlineEditableTitle({
     setIsEditing(false);
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter") {
-      e.preventDefault();
+  function handleKeyDown(event: React.KeyboardEvent) {
+    if (event.key === "Enter") {
+      event.preventDefault();
       handleSave();
-    } else if (e.key === "Escape") {
+    } else if (event.key === "Escape") {
       handleCancel();
     }
   }
@@ -913,7 +860,7 @@ function InlineEditableTitle({
         ref={inputRef}
         type="text"
         value={editValue}
-        onChange={(e) => setEditValue(e.target.value)}
+        onChange={(event) => setEditValue(event.target.value)}
         onBlur={handleSave}
         onKeyDown={handleKeyDown}
         className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-3xl font-bold outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring"
@@ -935,7 +882,6 @@ function InlineEditableTitle({
 
 function InlineEditableDescription({
   value,
-  courseId,
 }: {
   value: string;
   courseId: number;
@@ -985,11 +931,11 @@ function InlineEditableDescription({
     setIsEditing(false);
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
+  function handleKeyDown(event: React.KeyboardEvent) {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
       handleSave();
-    } else if (e.key === "Escape") {
+    } else if (event.key === "Escape") {
       handleCancel();
     }
   }
@@ -1000,10 +946,10 @@ function InlineEditableDescription({
         <textarea
           ref={textareaRef}
           value={editValue}
-          onChange={(e) => {
-            setEditValue(e.target.value);
-            e.target.style.height = "auto";
-            e.target.style.height = e.target.scrollHeight + "px";
+          onChange={(event) => {
+            setEditValue(event.target.value);
+            event.target.style.height = "auto";
+            event.target.style.height = event.target.scrollHeight + "px";
           }}
           onBlur={handleSave}
           onKeyDown={handleKeyDown}
@@ -1068,11 +1014,11 @@ function InlineEditableModuleTitle({
     setIsEditing(false);
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter") {
-      e.preventDefault();
+  function handleKeyDown(event: React.KeyboardEvent) {
+    if (event.key === "Enter") {
+      event.preventDefault();
       handleSave();
-    } else if (e.key === "Escape") {
+    } else if (event.key === "Escape") {
       handleCancel();
     }
   }
@@ -1083,7 +1029,7 @@ function InlineEditableModuleTitle({
         ref={inputRef}
         type="text"
         value={editValue}
-        onChange={(e) => setEditValue(e.target.value)}
+        onChange={(event) => setEditValue(event.target.value)}
         onBlur={handleSave}
         onKeyDown={handleKeyDown}
         className="w-full rounded-md border border-input bg-background px-2 py-1 text-base font-semibold outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring"
@@ -1199,11 +1145,11 @@ function AddModuleForm() {
     );
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter") {
-      e.preventDefault();
+  function handleKeyDown(event: React.KeyboardEvent) {
+    if (event.key === "Enter") {
+      event.preventDefault();
       handleSubmit();
-    } else if (e.key === "Escape") {
+    } else if (event.key === "Escape") {
       setTitle("");
       setIsAdding(false);
     }
@@ -1230,7 +1176,7 @@ function AddModuleForm() {
         type="text"
         placeholder="Module title..."
         value={title}
-        onChange={(e) => setTitle(e.target.value)}
+        onChange={(event) => setTitle(event.target.value)}
         onKeyDown={handleKeyDown}
         className="max-w-xs"
       />
@@ -1290,11 +1236,11 @@ function InlineEditableLessonTitle({
     setIsEditing(false);
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter") {
-      e.preventDefault();
+  function handleKeyDown(event: React.KeyboardEvent) {
+    if (event.key === "Enter") {
+      event.preventDefault();
       handleSave();
-    } else if (e.key === "Escape") {
+    } else if (event.key === "Escape") {
       handleCancel();
     }
   }
@@ -1305,7 +1251,7 @@ function InlineEditableLessonTitle({
         ref={inputRef}
         type="text"
         value={editValue}
-        onChange={(e) => setEditValue(e.target.value)}
+        onChange={(event) => setEditValue(event.target.value)}
         onBlur={handleSave}
         onKeyDown={handleKeyDown}
         className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring"
@@ -1327,7 +1273,6 @@ function InlineEditableLessonTitle({
 
 function DeleteLessonButton({
   lessonId,
-  lessonTitle,
 }: {
   lessonId: number;
   lessonTitle: string;
@@ -1418,11 +1363,11 @@ function AddLessonForm({ moduleId }: { moduleId: number }) {
     );
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter") {
-      e.preventDefault();
+  function handleKeyDown(event: React.KeyboardEvent) {
+    if (event.key === "Enter") {
+      event.preventDefault();
       handleSubmit();
-    } else if (e.key === "Escape") {
+    } else if (event.key === "Escape") {
       setTitle("");
       setIsAdding(false);
     }
@@ -1449,7 +1394,7 @@ function AddLessonForm({ moduleId }: { moduleId: number }) {
         type="text"
         placeholder="Lesson title..."
         value={title}
-        onChange={(e) => setTitle(e.target.value)}
+        onChange={(event) => setTitle(event.target.value)}
         onKeyDown={handleKeyDown}
         className="max-w-xs text-sm"
       />
@@ -1476,19 +1421,6 @@ function AddLessonForm({ moduleId }: { moduleId: number }) {
   );
 }
 
-function statusBadgeColor(status: string) {
-  switch (status) {
-    case CourseStatus.Published:
-      return "text-green-800 dark:text-green-400";
-    case CourseStatus.Draft:
-      return "text-yellow-800 dark:text-yellow-400";
-    case CourseStatus.Archived:
-      return "text-gray-800 dark:text-gray-400";
-    default:
-      return "";
-  }
-}
-
 export default function InstructorCourseEditor({
   loaderData,
 }: Route.ComponentProps) {
@@ -1501,7 +1433,7 @@ export default function InstructorCourseEditor({
   const priceFetcher = useFetcher();
   const pppFetcher = useFetcher();
 
-  const [salesCopy, setSalesCopy] = useState(course.salesCopy);
+  const [salesCopy, setSalesCopy] = useState<string>(course.salesCopy);
   const salesCopyHasChanges = salesCopy !== course.salesCopy;
   const salesCopyIsEmpty = salesCopy.trim().length === 0;
 
@@ -1947,22 +1879,25 @@ export default function InstructorCourseEditor({
                         step="0.01"
                         defaultValue={(course.price / 100).toFixed(2)}
                         className="w-28"
-                        onBlur={(e) => {
-                          const val = parseFloat(e.target.value);
+                        onBlur={(event) => {
+                          const value = parseFloat(event.target.value);
                           if (
-                            !isNaN(val) &&
-                            val >= 0 &&
-                            Math.round(val * 100) !== course.price
+                            !isNaN(value) &&
+                            value >= 0 &&
+                            Math.round(value * 100) !== course.price
                           ) {
                             priceFetcher.submit(
-                              { intent: "update-price", price: e.target.value },
+                              {
+                                intent: "update-price",
+                                price: event.target.value,
+                              },
                               { method: "post" }
                             );
                           }
                         }}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            (e.target as HTMLInputElement).blur();
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            (event.target as HTMLInputElement).blur();
                           }
                         }}
                       />
@@ -2233,7 +2168,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
           ? error.data
           : "Please select a user from the DevUI panel.";
     } else if (error.status === 403) {
-      title = "Access denied";
+      title = "Not allowed";
       message =
         typeof error.data === "string"
           ? error.data
