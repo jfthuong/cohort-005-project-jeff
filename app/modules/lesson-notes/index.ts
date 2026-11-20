@@ -1,4 +1,4 @@
-import { describe } from "./lib/draft";
+import { summarizeDraft } from "./lib/draft";
 
 export type { NoteDraft, NoteDraftState } from "./lib/draft";
 
@@ -7,5 +7,5 @@ export type { NoteDraft, NoteDraftState } from "./lib/draft";
  * body last saved (`null` when they have never saved a Note on the Lesson).
  */
 export function describeNoteDraft(draft: string, savedBody: string | null) {
-  return describe(draft, savedBody);
+  return summarizeDraft(draft, savedBody);
 }

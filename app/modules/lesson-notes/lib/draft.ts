@@ -10,7 +10,10 @@ export type NoteDraft = {
   canSave: boolean;
 };
 
-export function describe(draft: string, savedBody: string | null): NoteDraft {
+export function summarizeDraft(
+  draft: string,
+  savedBody: string | null
+): NoteDraft {
   const trimmed = draft.trim();
   const tooLong = trimmed.length > MAX_NOTE_LENGTH;
   // The server trims before it stores, so trailing whitespace is not a change.
