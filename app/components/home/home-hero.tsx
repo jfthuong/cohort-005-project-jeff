@@ -99,13 +99,12 @@ function HeroStats({
   return (
     <dl className="mt-12 grid max-w-xl grid-cols-3 gap-6 border-t border-border pt-8">
       {stats.map((stat) => (
-        <div key={stat.label}>
-          <dt className="sr-only">{stat.label}</dt>
+        <div key={stat.label} className="flex flex-col-reverse">
+          <dt className="mt-1 font-mono text-[0.7rem] uppercase tracking-[0.15em] text-muted-foreground">
+            {stat.label}
+          </dt>
           <dd className="font-mono text-2xl font-semibold sm:text-3xl">
             {stat.value}
-          </dd>
-          <dd className="mt-1 font-mono text-[0.7rem] uppercase tracking-[0.15em] text-muted-foreground">
-            {stat.label}
           </dd>
         </div>
       ))}
