@@ -48,6 +48,9 @@ export function HomeHero({
 const CARD_TILTS = ["-rotate-6", "rotate-6", "-rotate-2"];
 
 function HeroArt({ courses }: { courses: HeroCourse[] }) {
+  if (courses.length === 0) return null;
+  const middle = (courses.length - 1) / 2;
+
   return (
     <div
       aria-hidden
@@ -60,7 +63,7 @@ function HeroArt({ courses }: { courses: HeroCourse[] }) {
             key={course.id}
             className={`absolute w-3/5 overflow-hidden rounded-xl border border-white/40 bg-card shadow-2xl ${CARD_TILTS[index] ?? ""}`}
             style={{
-              transform: `translate(${(index - 1) * 22}%, ${(index - 1) * 8}%)`,
+              transform: `translate(${(index - middle) * 22}%, ${(index - middle) * 8}%)`,
             }}
           >
             <CourseImage
