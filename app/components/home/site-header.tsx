@@ -1,7 +1,7 @@
 import { Link } from "react-router";
-import { useEffect, useState } from "react";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "~/components/ui/button";
+import { useDarkMode } from "~/lib/use-dark-mode";
 
 export function SiteHeader({ signedIn }: { signedIn: boolean }) {
   return (
@@ -46,20 +46,7 @@ export function SiteHeader({ signedIn }: { signedIn: boolean }) {
 }
 
 function ThemeToggle() {
-  const [isDark, setIsDark] = useState(false);
-
-  useEffect(() => {
-    setIsDark(document.documentElement.classList.contains("dark"));
-  }, []);
-
-  function toggleDarkMode() {
-    const next = !isDark;
-    setIsDark(next);
-    document.documentElement.classList.toggle("dark", next);
-    try {
-      localStorage.setItem("cadence-theme", next ? "dark" : "light");
-    } catch {}
-  }
+  const { isDark, toggleDarkMode } = useDarkMode();
 
   return (
     <button
